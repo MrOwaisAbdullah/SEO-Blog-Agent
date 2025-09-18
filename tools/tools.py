@@ -337,7 +337,7 @@ async def post_to_sanity_tool(
     image_path: str,
     slug: Optional[str] = None,
     alt_text: Optional[str] = None,
-    faqs: Optional[List[FAQItem]] = None
+    faqs: Optional[List[Any]] = None
 ) -> Dict[str, Any]:
     """
     Posts a blog to Sanity CMS using the updated SanityAdapter.
@@ -383,23 +383,20 @@ async def post_to_sanity_tool(
         else:
             logger.error("File does not exist at local_image_path!")
 
-        # # Convert Pydantic FAQItem objects to plain dictionaries for SanityAdapter
-        # faqs_dict = [faq.dict() for faq in faqs] if faqs else []
-
-        # # --- Sanity CMS Posting ---
-        # result = adapter.post_blog(
-        #     title=title,
-        #     summary=summary,
-        #     content=content,
-        #     categories=categories,
-        #     local_image_path=local_image_path,
-        #     slug=slug,
-        #     alt_text=alt_text,
-        #     faqs=faqs_dict
-        # )
-
-        faqs_list = faqs if faqs else []
-
+        # Convert FAQItem objects or dictionaries to plain dictionaries for SanityAdapter
+        faqs_list = []
+        if faqs:
+            for faq in faqs:
+                if hasattr(faq, 'dict'):  # Pydantic model
+                    faq_dict = faq.dict()
+                    if 'question' in faq_dict and 'answer' in faq_dict:
+                        faqs_list.append(faq_dict)
+                elif isinstance(faq, dict):  # Regular dictionary
+                    if 'question' in faq and 'answer' in faq:
+                        faqs_list.append(faq)
+                else:
+                    logger.warning(f"Skipping invalid FAQ item: {faq}")
+        
         # --- Sanity CMS Posting ---
         result = adapter.post_blog(
             title=title,

@@ -144,7 +144,7 @@ preparation_agent = Agent(
 posting_agent = Agent(
     name="Posting Agent",
     instructions="""
-    You are the Posting Agent. Your ONLY job is to publish blog posts to Sanity CMS.
+    You are the Posting Agent. Your ONLY job is to publish blog posts to Sanity CMS and update Google Sheets.
     
     YOU MUST CALL THE `post_to_sanity_tool` TOOL. THIS IS NOT OPTIONAL.
     
@@ -183,9 +183,21 @@ posting_agent = Agent(
       "faqs": [FAQS]
     }
     
-    Step 5: Update Google Sheets to mark post as published
+    Step 5: After successfully posting to Sanity, update the Google Sheet:
+    - Use `manage_sheet_data_tool` with:
+      - `action="find_row_by_key"`
+      - `worksheet_name="generated_posts"`
+      - `key_column="Keyword/Topic"`
+      - `key_value="[SOURCE_KEYWORD_TOPIC]"`
+    - Get the row index from the result
+    - Use `manage_sheet_data_tool` again with:
+      - `action="update_cells"`
+      - `worksheet_name="generated_posts"`
+      - `cell_range="G[row_index]"` (where [row_index] is the row number from the previous step)
+      - `data=[["Yes"]]` (note the double brackets for a 2D array)
     
     IMPORTANT: If you don't call post_to_sanity_tool, you have FAILED at your job.
+    IMPORTANT: You must update the Google Sheet after posting to Sanity.
     """,
     tools=[post_to_sanity_tool, manage_sheet_data_tool],
     hooks=MyAgentHooks(),
