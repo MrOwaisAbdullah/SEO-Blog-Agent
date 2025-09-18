@@ -60,7 +60,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     - Confirm sheet update before outputting.
 
     **Output (String):**
-    "AI social media tools for agencies" or "https://www.youtube.com/watch?v=example"
+    "AI social media tools for agencies"
     """,
         tools=[get_keyword_tool],
         hooks=MyAgentHooks(),
@@ -68,40 +68,40 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         model_settings=ModelSettings(temperature=0.5),
     )
 
-    youtube_research_agent = Agent(
-        name="YouTube Research Agent",
-        instructions="""
-        **Role and Objective:**
-        You are the YouTube Research Agent, responsible for extracting and analyzing YouTube video transcripts to identify key topics and insights for blog posts.
+    # youtube_research_agent = Agent(
+    #     name="YouTube Research Agent",
+    #     instructions="""
+    #     **Role and Objective:**
+    #     You are the YouTube Research Agent, responsible for extracting and analyzing YouTube video transcripts to identify key topics and insights for blog posts.
 
-        **Instructions:**
-        1. **Input**: Receive a YouTube URL or video ID.
-        2. **Fetch Transcript**: Use the get_youtube_transcript tool to fetch the transcript of the video.
-        3. **Extract Key Topics**: Analyze the transcript to identify key topics, points, or features discussed in the video.
-        4. **Output**: Return a dictionary with:
-            - "main_topic": The main topic or keyword from the transcript.
-            - "summary": A brief summary of the content (100-150 words).
-            - "source_urls": List of URLs where the transcript was sourced.
-            - "source_titles": List of titles corresponding to those URLs.
-            - "user_intent": User intent classification (e.g., informational, navigational, transactional).
-            - "search_volume": Search volume for the main topic (if available).
-            - "difficulty": Difficulty score for ranking (if available).
+    #     **Instructions:**
+    #     1. **Input**: Receive a YouTube URL or video ID.
+    #     2. **Fetch Transcript**: Use the get_youtube_transcript tool to fetch the transcript of the video.
+    #     3. **Extract Key Topics**: Analyze the transcript to identify key topics, points, or features discussed in the video.
+    #     4. **Output**: Return a dictionary with:
+    #         - "main_topic": The main topic or keyword from the transcript.
+    #         - "summary": A brief summary of the content (100-150 words).
+    #         - "source_urls": List of URLs where the transcript was sourced.
+    #         - "source_titles": List of titles corresponding to those URLs.
+    #         - "user_intent": User intent classification (e.g., informational, navigational, transactional).
+    #         - "search_volume": Search volume for the main topic (if available).
+    #         - "difficulty": Difficulty score for ranking (if available).
 
-        **Tools**:
-        - `get_youtube_transcript`: Fetch the transcript of a YouTube video.
-        - `fetch_url_title`: Fetch titles for URLs.
-        - `tavily_search_tool`: Find relevant web pages (1 credit/query).  
-        - `tavily_extract_tool`: Get clean text from URLs (1 credit/5 URLs).  
-        - `tavily_crawl_tool`: Explore website structure (1 credit/5 URLs).  
-        - `fetch_url_title`: Fetch URL titles and snippets.  
+    #     **Tools**:
+    #     - `get_youtube_transcript`: Fetch the transcript of a YouTube video.
+    #     - `fetch_url_title`: Fetch titles for URLs.
+    #     - `tavily_search_tool`: Find relevant web pages (1 credit/query).  
+    #     - `tavily_extract_tool`: Get clean text from URLs (1 credit/5 URLs).  
+    #     - `tavily_crawl_tool`: Explore website structure (1 credit/5 URLs).  
+    #     - `fetch_url_title`: Fetch URL titles and snippets.  
 
 
-        """,
-        tools=[get_youtube_transcript, fetch_url_title, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool],
-        hooks=MyAgentHooks(),
-        model=get_model_by_name("cohere"),
-        model_settings=ModelSettings(temperature=0.5),
-    )
+    #     """,
+    #     tools=[get_youtube_transcript, fetch_url_title, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool],
+    #     hooks=MyAgentHooks(),
+    #     model=get_model_by_name("cohere"),
+    #     model_settings=ModelSettings(temperature=0.5),
+    # )
 
 
 
@@ -168,7 +168,6 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         2. **Consolidate Output**:
         - For each finding in the "data" list, use `manage_sheet_data_tool` with action="append_row" to write to the `research_data` worksheet.
         - Use the following columns:
-          - Source Type (YouTube if a URL was researched, Keyword otherwise)
           - Keyword/Topic (main topic or keyword from finding)
           - Search Volume (from finding, or "N/A" for YouTube)
           - Difficulty (from finding, or "N/A" for YouTube)
@@ -215,7 +214,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
 # Step 1: Run Triage Agent to get the input
     triage_result = await run_flow_with_agent_fallback(
         triage_agent,
-        "Check the Keyword sheet and return the next keyword or YouTube link",
+        "Check the Keyword sheet and return the next keyword or topic",
         LLM_MODELS,
         is_model_available,
         get_model_by_name,

@@ -190,11 +190,12 @@ posting_agent = Agent(
       - `key_column="Keyword/Topic"`
       - `key_value="[SOURCE_KEYWORD_TOPIC]"`
     - Get the row index from the result
+    - Convert the row index to a cell range. For example, if the row index is 2 and the Published column is column G, the cell range would be "G2"
     - Use `manage_sheet_data_tool` again with:
       - `action="update_cells"`
       - `worksheet_name="generated_posts"`
       - `cell_range="G[row_index]"` (where [row_index] is the row number from the previous step)
-      - `data=[["Yes"]]` (note the double brackets for a 2D array)
+      - `data=[["Yes"]]` (note the double brackets for a 2D array - this is required for update_cells)
     
     IMPORTANT: If you don't call post_to_sanity_tool, you have FAILED at your job.
     IMPORTANT: You must update the Google Sheet after posting to Sanity.

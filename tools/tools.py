@@ -91,7 +91,7 @@ def get_brand_context_tool():
                 "pain": "Marketing on nights/weekends, zero design skills",
                 "gain": "AI does 80 %, they tweak 20 %, results in 5 min",
                 "trigger": "Quarterly sales dip"
-            }
+            },
         },
 
         # Messaging Pillars
@@ -116,18 +116,15 @@ def get_brand_context_tool():
                 "Up to 83 % cheaper than Hootsuite for 10 profiles."
             )
         },
-
-        # Language Rules
-        "banned_words": [
-            "revolutionary", "disruptive", "leverage (as verb)", "synergy",
-            "game-changer", "cutting-edge"
-        ],
         "preferred_terms": {
             "AI": "your creative sidekick",
             "users": "creators & teams",
             "analytics": "insights that matter",
             "scheduling": "calendar on autoplay"
         },
+        
+        # Language Rules
+        "banned_words": ["enterprise", "solution", "synergy", "leverage (as verb)", "disruptive", "cutting-edge", "game-changer", "revolutionary", "revolutionize", "dive in", "venture", "innovative", "realm", "adhere", "delve", "reimagine", "robust", "orchestrate", "diverse", "commendable", "embrace", "paramount", "beacon", "captivate", "commendable", "advancement in the realm", "aims to bridge", "aims to democratize", "aims to foster innovation and collaboration", "becomes increasingly evident", "behind the veil", "breaking barriers", "breakthrough has the potential to revolutionize the way", "bringing us", "bringing us closer to a future", "by combining the capabilities", "by harnessing the power", "capturing the attention", "continue to advance", "continue to make significant strides", "continue to push the boundaries", "continues to progress rapidly", "crucial to be mindful", "crucially", "cutting-edge", "drive the next big", "encompasses a wide range of real-life scenarios", "enhancement further enhances", "ensures that even", "essential to understand the nuances", "excitement", "exciting opportunities", "exciting possibilities", "exciting times lie ahead as we unlock the potential of", "excitingly", "expanded its capabilities", "expect to witness transformative breakthroughs", "expect to witness transformative breakthroughs in their capabilities", "exploration of various potential answers", "explore the fascinating world", "exploring new frontiers", "exploring this avenue", "foster the development", "future might see us placing", "groundbreaking way", "groundbreaking advancement", "groundbreaking study", "groundbreaking technology", "have come a long way in recent years", "hold promise", "implications are profound", "improved efficiency in countless ways", "in conclusion", "in the fast-paced world", "innovative service", "intrinsic differences", "it discovered an intriguing approach", "it remains to be seen", "it serves as a stepping stone towards the realization", "latest breakthrough signifies", "latest offering", "let’s delve into the exciting details", "main message to take away", "make informed decisions", "mark a significant step forward", "mind-boggling figure","more robust evaluation","for instance","navigate the landscape","notably","one step closer","one thing is clear","only time will tell","opens up exciting possibilities","paving the way for enhanced performance","possibilities are endless","potentially revolutionizing the way","push the boundaries","raise fairness concerns","raise intriguing questions","rapid pace of development","rapidly developing","redefine the future","remarkable abilities","remarkable breakthrough","remarkable proficiency","remarkable success","remarkable tool","remarkably","elevate ","captivate ","tapestry ","delve ","leverage ","resonate ","foster ","endeavor ","embark ","unleash ","renowned","represent a major milestone","represents a significant milestone in the field","revolutionize the way","revolutionizing the way","risks of drawing unsupported conclusions","seeking trustworthiness","significant step forward","significant strides","the necessity of clear understanding","there is still room for improvement","transformative power","truly exciting","uncover hidden trends","understanding of the capabilities","unleashing the potential","unlocking the power","unraveling","we can improve understanding and decision-making","welcome your thoughts","what sets this apart","what’s more","with the introduction","bespoke","whimsical","meticulous","emerge","refrain","vibrant","reimagine","evolve","supercharge","pivotal"],
 
         # Call-to-Actions (CTA Library)
         "ctas": {
@@ -157,6 +154,127 @@ def get_brand_context_tool():
             "and we’ll delete everything with one click."
         )
     }
+
+# Owais Abdullah – Personal Brand Context
+@function_tool
+def get_author_context_tool():
+    """
+    Returns the single source of truth for all Owais Abdullah.
+    Use this object to:
+      • Guide GPT/Gemini prompts
+      • Write website copy, captions, ads, and outreach emails
+      • Keep a consistent tone across all platforms
+    """
+    return {
+        # Core Identity
+        "brand_name": "Owais Abdullah",
+        "tagline": "Web, AI & Automation—Made Simple.",
+        "mission": (
+            "Helping businesses and creators build smarter web experiences, "
+            "AI-driven tools, and automation systems—without overcomplicating technology."
+        ),
+
+        # Brand Personality
+        "tone": (
+            "Approachable, clear, and solution-focused—like a tech-savvy friend who "
+            "breaks complex ideas into simple, actionable steps. Confident but never arrogant."
+        ),
+        "voice_examples": {
+            "good": [
+                "Smart tools don’t need to feel complicated—let’s make them work for you.",
+                "From your idea to a live, polished product—handled with care and precision.",
+                "Your project deserves more than templates—it deserves thoughtful development."
+            ],
+            "avoid": [
+                "Our paradigm-shifting solution will revolutionize the digital landscape.",
+                "This disruptive technology will change everything overnight."
+            ]
+        },
+
+        # Visual & Emoji Language
+        "primary_emojis": ["🚀", "🤖", "⚙️", "🌐", "💡"],
+        "accent_emojis": ["📈", "🛠️", "✅", "☕"],
+        "color_palette": {
+            "primary": "#3A69FF",   # Your primary accent
+            "accent": "#1E293B",    # Dark slate for contrast
+            "neutral": "#F8FAFC",   # Soft white
+            "highlight": "#10B981"  # Secondary pop of green
+        },
+
+        # Audience Personas
+        "personas": {
+            "startup_founder": {
+                "name": "Startup Founder",
+                "pain": "Limited resources, need reliable web or AI tools quickly.",
+                "gain": "A partner who can design, build, and ship efficiently.",
+                "trigger": "Looking to launch an MVP or improve workflows."
+            },
+            "smb_owner": {
+                "name": "Small Business Owner",
+                "pain": "Wants an online presence or automation without technical headaches.",
+                "gain": "A clear plan and smooth delivery of their site or app.",
+                "trigger": "Needs to boost sales or streamline operations."
+            },
+            "creator": {
+                "name": "Content Creator",
+                "pain": "Struggles with scaling content and repurposing efficiently.",
+                "gain": "AI tools that handle research, posting, and automation.",
+                "trigger": "Ready to grow across multiple platforms."
+            },
+        },
+
+        # Messaging Pillars
+        "key_messages": [
+            "Web and AI development without unnecessary complexity.",
+            "Your ideas, built into reliable apps, sites, or agents.",
+            "Automation and AI that save time and boost results.",
+            "Partnership over jargon—clear, honest communication at every step."
+        ],
+
+        # Differentiators → Proof Points
+        "proof_points": {
+            "experience": "2+ years delivering professional web apps, AI tools, and automation workflows.",
+            "breadth": "Full-stack expertise: React, Next.js, TypeScript, Tailwind CSS, Python, Sanity, WordPress, and AI agents.",
+            "track_record": "Projects include e-commerce marketplaces, SEO blog agents, AI social tools, and renting platforms."
+        },
+
+        # Preferred and Banned Terms
+        "preferred_terms": {
+            "AI": "smart automation",
+            "users": "clients or creators",
+            "website": "web experience",
+            "tool": "solution"
+        },
+
+        "banned_words": ["enterprise", "solution", "synergy", "leverage (as verb)", "disruptive", "cutting-edge", "game-changer", "revolutionary", "revolutionize", "dive in", "venture", "innovative", "realm", "adhere", "delve", "reimagine", "robust", "orchestrate", "diverse", "commendable", "embrace", "paramount", "beacon", "captivate", "commendable", "advancement in the realm", "aims to bridge", "aims to democratize", "aims to foster innovation and collaboration", "becomes increasingly evident", "behind the veil", "breaking barriers", "breakthrough has the potential to revolutionize the way", "bringing us", "bringing us closer to a future", "by combining the capabilities", "by harnessing the power", "capturing the attention", "continue to advance", "continue to make significant strides", "continue to push the boundaries", "continues to progress rapidly", "crucial to be mindful", "crucially", "cutting-edge", "drive the next big", "encompasses a wide range of real-life scenarios", "enhancement further enhances", "ensures that even", "essential to understand the nuances", "excitement", "exciting opportunities", "exciting possibilities", "exciting times lie ahead as we unlock the potential of", "excitingly", "expanded its capabilities", "expect to witness transformative breakthroughs", "expect to witness transformative breakthroughs in their capabilities", "exploration of various potential answers", "explore the fascinating world", "exploring new frontiers", "exploring this avenue", "foster the development", "future might see us placing", "groundbreaking way", "groundbreaking advancement", "groundbreaking study", "groundbreaking technology", "have come a long way in recent years", "hold promise", "implications are profound", "improved efficiency in countless ways", "in conclusion", "in the fast-paced world", "innovative service", "intrinsic differences", "it discovered an intriguing approach", "it remains to be seen", "it serves as a stepping stone towards the realization", "latest breakthrough signifies", "latest offering", "let’s delve into the exciting details", "main message to take away", "make informed decisions", "mark a significant step forward", "mind-boggling figure","more robust evaluation","for instance","navigate the landscape","notably","one step closer","one thing is clear","only time will tell","opens up exciting possibilities","paving the way for enhanced performance","possibilities are endless","potentially revolutionizing the way","push the boundaries","raise fairness concerns","raise intriguing questions","rapid pace of development","rapidly developing","redefine the future","remarkable abilities","remarkable breakthrough","remarkable proficiency","remarkable success","remarkable tool","remarkably","elevate ","captivate ","tapestry ","delve ","leverage ","resonate ","foster ","endeavor ","embark ","unleash ","renowned","represent a major milestone","represents a significant milestone in the field","revolutionize the way","revolutionizing the way","risks of drawing unsupported conclusions","seeking trustworthiness","significant step forward","significant strides","the necessity of clear understanding","there is still room for improvement","transformative power","truly exciting","uncover hidden trends","understanding of the capabilities","unleashing the potential","unlocking the power","unraveling","we can improve understanding and decision-making","welcome your thoughts","what sets this apart","what’s more","with the introduction","bespoke","whimsical","meticulous","emerge","refrain","vibrant","reimagine","evolve","supercharge","pivotal"],
+
+        # Call-to-Actions (CTAs)
+        "ctas": {
+            "hire": "Let’s build your project",
+            "contact": "Reach out today",
+            "learn_more": "See Owais’s work",
+            "start": "Start your web or AI journey"
+        },
+
+        # Social Caption Templates
+        "caption_templates": [
+            "🚀 Another idea turned into reality. Smart tools, clean code, and clear results.",
+            "🤖 Built an AI agent today that saves hours of manual work—what could it do for you?",
+            "⚙️ Websites and automations that actually make life easier—not harder."
+        ],
+
+        # Support & Help Tone
+        "support_tone": (
+            "Helpful and straightforward. Provide clear answers without fluff, and guide the user confidently."
+        ),
+
+        # Compliance & Trust
+        "data_message": (
+            "Any shared data stays private and is only used for delivering requested services. "
+            "Your privacy and trust come first."
+        )
+    }
+
 
 @function_tool
 def textstat_tool(content: str):
