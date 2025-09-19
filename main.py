@@ -112,9 +112,9 @@ async def generate_brief(api_key: str = Security(verify_api_key)):
             max_turns=MAX_TURNS
         )
         serialized_result = serialize_result(result)
-        return {"status": "success", "message": "Content generation completed.", "result": serialized_result}
+        return {"status": "success", "message": "Content brief generation completed.", "result": serialized_result}
     except Exception as e:
-        print(f"Error in /generate_content: {e}")
+        print(f"Error in /generate_brief: {e}")
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
 
 

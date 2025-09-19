@@ -1,5 +1,6 @@
 from typing import Optional, Dict
 import logging
+import re
 from agents import Agent, function_tool, ModelSettings
 from tools.search_tools import web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
 from blog_agent.blog_agents import MyAgentHooks
@@ -227,15 +228,10 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
 
     input_string = triage_result["final_output"]  # The output is a single string
 
-    # Step 2: Determine if the input is a YouTube URL or a keyword
-    if re.search(r"youtube\.com|youtu\.be", input_string):
-        # It's a YouTube URL, run YouTube Research Agent
-        research_agent = youtube_research_agent
-        research_input = input_string  # Pass the URL directly
-    else:
-        # It's a keyword, run Researcher Agent
-        research_agent = researcher_agent
-        research_input = input_string  # Pass the keyword directly
+    # Step 2: For now, always use the Researcher Agent regardless of input type
+    # (youtube_research_agent is commented out)
+    research_agent = researcher_agent
+    research_input = input_string  # Pass the input directly (keyword or URL)
 
     # Step 3: Run the appropriate Research Agent with fallback logic
     research_result = await run_flow_with_agent_fallback(
