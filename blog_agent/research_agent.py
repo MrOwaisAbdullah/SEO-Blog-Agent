@@ -7,6 +7,7 @@ from blog_agent.blog_agents import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from blog_agent.llm_clients import run_flow_with_agent_fallback
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
+from blog_agent.custom_runner import FallbackAgentRunner
 
 
 # Configure logging
@@ -29,6 +30,9 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         Dict[str, Optional[str]]: A dictionary containing the workflow status and results.
     """
     # Initialize agents
+    # Create a custom runner instance to get the model getter function
+    custom_runner = FallbackAgentRunner()
+    
     triage_agent = Agent(
         name="Triage Agent",
         instructions=f"""
@@ -49,7 +53,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
        - Ensure the input is a non-empty string relevant to social media content creation or scheduling.
        - Do not assume or generate inputs; use only sheet data.
     5. **Output**:
-       - Return the input as a plain string, either the keyword (e.g., "best coffee maker 2025") or the YouTube URL (e.g., "[invalid url, do not cite]).
+       - Return the input as a plain string, either the keyword (e.g., "best coffee maker 2025") or the YouTube URL (e.g., "[invalid url, do not cite).
 
     **Tools:**
     - Google Sheets tool `get_keyword_tool`: Read/write access to "ContentSpark_Keywords".
@@ -65,7 +69,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     """,
         tools=[get_keyword_tool],
         hooks=MyAgentHooks(),
-        model=get_model_by_name("gemini-2.5-flash-lite"),
+        model=custom_runner.get_model_by_name("gemini-2.5-flash-lite"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
@@ -154,7 +158,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         """,
         tools=[web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title],
         hooks=MyAgentHooks(),
-        model=get_model_by_name("cohere"),
+        model=custom_runner.get_model_by_name("cohere"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
@@ -176,7 +180,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
           - Content Summary (from finding)
           - Source URLs (from finding)
           - Source Titles (from finding)
-          - Approve/Disapprove (empty for manual review)
+          - Approve/Disapprove (set to "Approve" by default - user can manually change to "Disapprove" if needed)
           - Generated (set to "no" for manual review)
         3. **Validation**:
         - Ensure all required fields are present or default to "N/A" where applicable.
@@ -199,7 +203,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
             "A brief summary of the content",
             ["https://example.com"],
             ["Example Title"],
-            "",
+            "Approve",
             "no"
           ]
         }
@@ -208,25 +212,23 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         """,
         tools=[manage_sheet_data_tool],
         hooks=MyAgentHooks(),
-        model=get_model_by_name("cohere"),
+        model=custom_runner.get_model_by_name("cohere"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
 # Step 1: Run Triage Agent to get the input
-    triage_result = await run_flow_with_agent_fallback(
+    # Use the custom runner instance we already created
+    
+    triage_result = await custom_runner.run_with_fallback(
         triage_agent,
         "Check the Keyword sheet and return the next keyword or topic",
-        LLM_MODELS,
-        is_model_available,
-        get_model_by_name,
-        increment_usage,
         max_turns=MAX_TURNS
     )
 
-    if "error" in triage_result:
-        return triage_result
+    if "error" in str(triage_result):
+        return {"error": str(triage_result)}
 
-    input_string = triage_result["final_output"]  # The output is a single string
+    input_string = triage_result.final_output if hasattr(triage_result, 'final_output') else str(triage_result)  # The output is a single string
 
     # Step 2: For now, always use the Researcher Agent regardless of input type
     # (youtube_research_agent is commented out)
@@ -234,27 +236,19 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     research_input = input_string  # Pass the input directly (keyword or URL)
 
     # Step 3: Run the appropriate Research Agent with fallback logic
-    research_result = await run_flow_with_agent_fallback(
+    research_result = await custom_runner.run_with_fallback(
         research_agent,
         research_input,
-        LLM_MODELS,
-        is_model_available,
-        get_model_by_name,
-        increment_usage,
         max_turns=MAX_TURNS
     )
 
-    if "error" in research_result:
-        return research_result
+    if "error" in str(research_result):
+        return {"error": str(research_result)}
 
     # Step 4: Run Output Agent with research results
-    output_result = await run_flow_with_agent_fallback(
+    output_result = await custom_runner.run_with_fallback(
         output_agent,
         str(research_result),  # Pass the research results as a string
-        LLM_MODELS,
-        is_model_available,
-        get_model_by_name,
-        increment_usage,
         max_turns=MAX_TURNS
     )
 
@@ -263,5 +257,15 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
 # Example usage (if run directly with an async event loop)
 if __name__ == "__main__":
     import asyncio
-    result = asyncio.run(combined_research_workflow(LLM_MODELS=[], is_model_available=lambda x: True, get_model_by_name=lambda x: None, increment_usage=lambda: None, MAX_TURNS=10))
+    # For direct execution, we need to create a proper runner instance
+    from blog_agent.custom_runner import FallbackAgentRunner
+    custom_runner = FallbackAgentRunner()
+    
+    result = asyncio.run(combined_research_workflow(
+        LLM_MODELS=custom_runner.LLM_MODELS, 
+        is_model_available=custom_runner.is_model_available, 
+        get_model_by_name=custom_runner.get_model_by_name, 
+        increment_usage=custom_runner.increment_usage, 
+        MAX_TURNS=10
+    ))
     print(result)

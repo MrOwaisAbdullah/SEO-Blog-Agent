@@ -185,6 +185,7 @@ def manage_sheet_data(
 
             elif action == "get_all_records":
                 records = worksheet.get_all_records()
+                logger.info(f"Retrieved {len(records)} records from {worksheet_name}")
                 return {"status": "success", "data": records, "count": len(records)}
 
             elif action == "get_row":
@@ -208,7 +209,9 @@ def manage_sheet_data(
             elif action == "append_row":
                 if not row_values:
                      return {"status": "error", "message": "row_values is required for append_row action."}
+                logger.info(f"Appending row to {worksheet_name}: {row_values}")
                 worksheet.append_row(row_values, value_input_option=value_input_option)
+                logger.info(f"Successfully appended row to {worksheet_name}")
                 return {"status": "success", "message": f"Row appended to {worksheet_name}."}
 
             elif action == "insert_row":
@@ -230,7 +233,11 @@ def manage_sheet_data(
             elif action == "update_cell":
                 if row_index is None or col_index is None or data is None: # data here is the cell value
                     return {"status": "error", "message": "row_index, col_index, and data (cell value) are required for update_cell action."}
-                worksheet.update_cell(row_index, col_index, data, value_input_option=value_input_option)
+                # For update_cell, data should be a simple string value
+                cell_value = data if isinstance(data, str) else str(data)
+                logger.info(f"Updating cell ({row_index}, {col_index}) in {worksheet_name} with value: {cell_value}")
+                worksheet.update_cell(row_index, col_index, cell_value)
+                logger.info(f"Successfully updated cell ({row_index}, {col_index}) in {worksheet_name}")
                 return {"status": "success", "message": f"Cell ({row_index}, {col_index}) updated in {worksheet_name}."}
 
             elif action == "update_cells":
@@ -315,7 +322,7 @@ def manage_sheet_data_tool( # Wrapper function for the decorator if needed, or a
         "update_cell", "update_cells", "delete_row", "clear_sheet",
         "find_row_by_key"
     ],
-    data: Optional[List[List[str]]] = None,
+    data: Optional[Union[List[List[str]], str]] = None,
     row_values: Optional[List[str]] = None,
     row_index: Optional[int] = None,
     col_values: Optional[List[str]] = None,

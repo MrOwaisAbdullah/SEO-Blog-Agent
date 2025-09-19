@@ -10,3 +10,5 @@ wheels/
 .venv
 
 .env
+
+/docs/OpenAI_agents_sdk_code_for_refference_dont_call_or_import

@@ -121,7 +121,9 @@ content_evaluation_agent = Agent(
     - `web_search_tool` (fallback): Web content for fact-checking.  
     - `x_search_tool` (fallback): Trending discussions for fact-checking.  
     - `textstat_tool`: Calculate readability metrics (Flesch-Kincaid, sentence length).  
-    - `grammar_check_tool`: Identify grammar/spelling errors.  
+    - `grammar_check_tool`: Identify grammar/spelling errors.
+
+    **IMPORTANT**: The generated_posts worksheet has the following columns in order: Keyword/Topic, Generated Content, FAQs, Quality Score, Status, Approve/Disapprove, Published  
 
     **Output (JSON in Markdown):**  
 
@@ -233,12 +235,13 @@ content_generator_agent = Agent(
     6. **Save Generated Content:**  
     - Use `manage_sheet_data_tool` (action="append_row", worksheet_name="generated_posts") to save:  
         - Keyword/Topic  
-        - Generated Content (highest-scored Markdown string with integrated links)  
-        - FAQs (JSON string)  
+        - Generated Content (highest-scored Markdown string with integrated links) - **IMPORTANT**: This should be ONLY the content, NOT including the FAQs
+        - FAQs (JSON string) - **IMPORTANT**: This should be a separate JSON string containing the FAQs, not combined with the content
         - Quality Score (integer)  
         - Status ("Generated")  
         - Approve/Disapprove ("")  
         - Published ("No")  
+    - **IMPORTANT**: The generated_posts worksheet has the following columns in order: Keyword/Topic, Generated Content, FAQs, Quality Score, Status, Approve/Disapprove, Published
     - Example tool call:  
         ```json
         {
@@ -247,6 +250,7 @@ content_generator_agent = Agent(
         "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...\n## Introduction...\nNespresso excels, per [Coffee Review](https://coffeereview.com)...", "[{\"question\": \"Can a coffee maker save time?\", \"answer\": \"Yes, models like Nespresso...\"}]", 92, "Generated", "", "No"]
         }
         ```  
+    - **IMPORTANT**: Make sure the FAQs are in a separate column as a JSON string, not combined with the content
     - Retry up to 3 times with 5-second delays; if it fails, include:  
         ```json
         { "errors": ["Failed to save to generated_posts after 3 attempts"] }
@@ -254,7 +258,8 @@ content_generator_agent = Agent(
 
     7. **Update `content_briefs` Row:**  
     - Use `manage_sheet_data_tool` (action="get_range", worksheet_name="content_briefs", cell_range="1:1") to identify the `Generated` column index.  
-    - Use `manage_sheet_data_tool` (action="update_cell", worksheet_name="content_briefs", row_index=[row_index], col_index=[Generated_column_index], data="Yes").  
+    - Use `manage_sheet_data_tool` (action="update_cell", worksheet_name="content_briefs", row_index=[row_index], col_index=[Generated_column_index], data="Yes").
+    - **Important**: When calling `update_cell`, the `data` parameter should be a simple string value, not a nested list. For example: `data="Yes"` not `data=[["Yes"]]`.  
     - Retry up to 3 times with 5-second delays; if it fails, include:  
         ```json
         { "warnings": ["Failed to update Generated column in content_briefs after 3 attempts"] }
@@ -314,8 +319,9 @@ content_generator_agent = Agent(
     "warnings": []
     }
     ```
+    **IMPORTANT**: The "Generated Content" field should contain ONLY the main content, and the "FAQs" field should contain a separate JSON string with the FAQs. Do not combine them.
     """,
-    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements")],
+    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements"), fetch_internal_links_tool],
     handoff_description="Use the given brief to create a high quality seo friendly Blog content, and use evaluation tools for feedback and improve the content using it.",
     hooks=MyAgentHooks(),
     model=get_model_by_name("gemini-2.5-flash"),
@@ -326,7 +332,7 @@ brief_agent = Agent(
     name="Brief Agent",
     instructions="""
     **Role and Objective:**  
-    You are the Content Brief Agent, an SEO expert tasked with creating detailed content briefs from approved rows in the `research_data` worksheet, ensuring alignment with user intent (informational, navigational, or transactional) and topical authority for a SaaS platform focused on automated social media content creation and scheduling. Each brief must cover the main topic comprehensively, outline 4–6 subtopics as a topic cluster, and use a conversational tone with questions to address user needs, optimized for AI Overviews with a separate FAQs field. Suggest natural placements for internal and external links within the content to enhance E-E-A-T and user experience, avoiding separate "Sources" or "Related Posts" sections. Use `manage_sheet_data_tool` to read approved rows and write briefs, and leverage Tavily tools for supplementary research, with `web_search_tool` and `x_search_tool` as fallbacks.
+    You are the Content Brief Agent, an SEO expert tasked with creating detailed content briefs from approved rows in the `research_data` worksheet, ensuring alignment with user intent (informational, navigational, or transactional) and topical authority for a SaaS platform focused on automated social media content creation and scheduling. Each brief must cover the main topic comprehensively, outline 4–6 subtopics as a topic cluster, and use a conversational tone with questions to address user needs, optimized for AI Overviews with a separate FAQs field. Suggest natural placements for external links within the content to enhance E-E-A-T and user experience, avoiding separate "Sources" or "Related Posts" sections. Use `manage_sheet_data_tool` to read approved rows and write briefs, and leverage Tavily tools for supplementary research, with `web_search_tool` and `x_search_tool` as fallbacks.
 
     **Inputs:**  
     Approved rows from `research_data` worksheet (where `Generated` = "No"), containing:
@@ -340,7 +346,20 @@ brief_agent = Agent(
     - Source Titles
     - Generated
 
-    **Instructions:**  
+    **Instructions:**
+    **IMPORTANT STEP-BY-STEP WORKFLOW - FOLLOW EXACTLY IN ORDER:**
+    1. First, call `manage_sheet_data_tool` with action="get_all_records" and worksheet_name="research_data" to get all records
+    2. Filter the records to find rows where the "Generated" column equals "No" (check both "No" and "no")
+    3. If no rows with "Generated" = "No" are found, return an error: {"status": "error", "message": "No ungenerated rows found in research_data."}
+    4. If a row is found, select the first one and note its row index (1-based index from the original sheet)
+    5. Extract the required data: Keyword/Topic, User Intent, Content Summary, Source URLs, Source Titles
+    6. Use search tools (`tavily_search_tool`, `tavily_extract_tool`) to gather additional information as needed
+    7. Generate the brief content following the structure specified below
+    8. Call `manage_sheet_data_tool` with action="append_row" and worksheet_name="content_briefs" to save the brief
+    9. Call `manage_sheet_data_tool` with action="get_range", worksheet_name="research_data", cell_range="1:1" to find the "Generated" column index
+    10. Call `manage_sheet_data_tool` with action="update_cell", worksheet_name="research_data", row_index=[correct row index], col_index=[correct column index], data="Yes" to mark the original row as generated
+    11. Return the success response with all required fields
+
     1. **Chain-of-Thought Planning:**  
     - Step 1: Review approved rows for Keyword/Topic, User Intent, Content Summary, Source URLs, and Source Titles.  
     - Step 2: Identify 4–6 subtopics to form a topic cluster, ensuring comprehensive coverage.  
@@ -351,7 +370,7 @@ brief_agent = Agent(
 
     2. **Find and Validate Row:**  
     - Use `manage_sheet_data_tool` (action="get_all_records", worksheet_name="research_data") to retrieve all records.  
-    - Filter for rows where `Generated` = "No".  
+    - Filter for rows where `Generated` = "No". **Important**: The value in the Generated column might be case-sensitive, so check for both "No" and "no".
     - Select the first matching row and note its row index (1-based) for updating `Generated`.  
     - If no matching row exists, return:  
         ```json
@@ -374,7 +393,7 @@ brief_agent = Agent(
         - **Title (H1)**: Include primary keyword, intent-driven (e.g., “Best Coffee Makers 2025: Brew Your Perfect Cup”).  
         - **Introduction**: 100–150 words, front-loading primary keyword, conversational tone (e.g., “Struggling to find a coffee maker that fits your morning rush?”), aligned with user intent.  
         - **Main Sections**: 4–6 H2 headings based on Content Summary (e.g., “Nespresso Features,” “Budget Options”), each with 50–100-word descriptions and 1–2 conversational questions (e.g., “What makes Nespresso stand out?”).  
-        - **Link Suggestions**: For each section, suggest 1–2 placements for internal and external links to be naturally integrated (e.g., “In ‘Nespresso Features,’ link to [AI Tips](/blog/ai-tips) when discussing automation; cite [Coffee Review](https://coffeereview.com) for Nespresso quality.”).  
+        - **Link Suggestions**: For each section, suggest 1–2 placements for external links to be naturally integrated (e.g., “In ‘Nespresso Features,’ link to [AI Tips](/blog/ai-tips) when discussing automation; cite [Coffee Review](https://coffeereview.com) for Nespresso quality.”).  
     - Use brand context (tone, emojis, no banned words).  
 
     - **Writing Style Guidelines**:  
@@ -384,7 +403,6 @@ brief_agent = Agent(
         - Avoid AI-generated sounding phrases  
         - Write naturally as if a human expert is explaining the topic  
         - Use meaningful link text suggestions:  
-            - Internal links: Suggest descriptive anchor text (e.g., "learn more about social media automation" not "click here")  
             - External links: Suggest descriptive anchor text (e.g., "according to industry research" not "source")  
             - Never suggest generic link text like "click here," "read more," or "link"  
 
@@ -407,7 +425,7 @@ brief_agent = Agent(
     - Verify Source Titles using `tavily_extract_tool` or `tavily_crawl_tool` on Source URLs; fallback to `web_search_tool` or `x_search_tool` if Tavily fails.  
     - If titles are unavailable, use URL as title.  
     - Store as comma-separated URLs with titles (e.g., “Coffee Review: https://coffeereview.com”).  
-    - Suggest 1-3 internal links using `fetch_internal_links_tool` (parameters: `topic=[Keyword/Topic]`, `max_results=3`, `exclude_slug=[slugified Keyword/Topic]`) and note their suggested placement in the brief.  
+      
 
     7. **Save to `content_briefs`:**  
     - Use `manage_sheet_data_tool` (action="append_row", worksheet_name="content_briefs") to save:  
@@ -416,13 +434,14 @@ brief_agent = Agent(
         - FAQs (JSON string)  
         - External Source Links (comma-separated URLs with titles)  
         - Content Summary (100–150 words, retained from `research_data`)  
+        - Approve/Disapprove (set to "Approve" by default - user can manually change to "Disapprove" if needed)  
         - Generated ("No")  
     - Example tool call:  
         ```json
         {
         "worksheet_name": "content_briefs",
         "action": "append_row",
-        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...\n## Introduction...\n[Link to AI Tips in Nespresso section]", "[{\"question\": \"How do you choose a coffee maker?\", \"answer\": \"Look for compact models...\"}]", "Coffee Review: https://coffeereview.com,Top 10: https://example.com", "Transcript discusses Nespresso...", "No"]
+        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...\n## Introduction...\n[Link to AI Tips in Nespresso section]", "[{\"question\": \"How do you choose a coffee maker?\", \"answer\": \"Look for compact models...\"}]", "Coffee Review: https://coffeereview.com,Top 10: https://example.com", "Transcript discusses Nespresso...", "Approve", "No"]
         }
         ```  
     - Retry up to 3 times with 5-second delays; if it fails, include:  
@@ -432,21 +451,22 @@ brief_agent = Agent(
 
     8. **Update `research_data` Row:**  
     - Use `manage_sheet_data_tool` (action="get_range", worksheet_name="research_data", cell_range="1:1") to identify the `Generated` column index.  
-    - Use `manage_sheet_data_tool` (action="update_cell", worksheet_name="research_data", row_index=[row_index], col_index=[Generated_column_index], data="Yes").  
+    - Use `manage_sheet_data_tool` (action="update_cell", worksheet_name="research_data", row_index=[row_index], col_index=[Generated_column_index], data="Yes").
+    - **Important**: When calling `update_cell`, the `data` parameter should be a simple string value, not a nested list. For example: `data="Yes"` not `data=[["Yes"]]`.
     - Retry up to 3 times with 5-second delays; if it fails, include:  
         ```json
         { "warnings": ["Failed to update Generated column in research_data after 3 attempts"] }
         ```  
 
     9. **Persistence:**  
-    - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `x_search_tool`, `manage_sheet_data_tool`, `fetch_internal_links_tool`) up to 3 times with 5-second delays.  
+    - **Important**: The row_index should be the 1-based index of the row you want to update. Make sure you're using the correct row index from the `get_all_records` call.
+    - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `x_search_tool`, `manage_sheet_data_tool`) up to 3 times with 5-second delays.  
     - Use fallbacks if Tavily fails.  
 
     11. **Validation:**  
         - Ensure brief includes H1 title, introduction, 4–6 H2 headings, FAQs (5–7 questions in JSON), and link suggestions.  
         - Verify questions are conversational and target user intent.  
         - Confirm External Source Links include verified titles for E-E-A-T.  
-        - Ensure internal link suggestions are relevant and contextually appropriate.  
         - Focus on AEO optimization: direct answers, structured content, and featured snippet opportunities.  
         - Do not fabricate data; rely on input row and tools.  
         - Always return a non-empty JSON output with `status`, `errors`, and `warnings` arrays.  
@@ -464,7 +484,6 @@ brief_agent = Agent(
     - `web_search_tool` (fallback): Web content for fact-checking.  
     - `x_search_tool` (fallback): Trending discussions for questions.  
     - `manage_sheet_data_tool`: Worksheet operations (action="get_all_records", "append_row", "update_cell").  
-    - `fetch_internal_links_tool`: Suggest internal links for placement.  
 
     **Output (JSON in Markdown):**  
 

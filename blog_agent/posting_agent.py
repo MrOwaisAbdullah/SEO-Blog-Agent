@@ -222,19 +222,21 @@ async def run_posting_workflow() -> Dict[str, Any]:
     max_retries = 3
     max_turns = 50
 
+    # Import the custom runner
+    from blog_agent.custom_runner import FallbackAgentRunner
+    custom_runner = FallbackAgentRunner()
+
     try:
         # --- Step 1: Run Preparation Agent ---
         logger.info("Running Preparation Agent...")
-        preparation_output = await run_flow_with_agent_fallback(
+        preparation_result = await custom_runner.run_with_fallback(
             preparation_agent,
             "Prepare the next blog post for publishing.",
-            LLM_MODELS,
-            is_model_available,
-            get_model_by_name,
-            increment_usage,
             max_retries=max_retries,
             max_turns=max_turns
         )
+        
+        preparation_output = preparation_result.final_output if hasattr(preparation_result, 'final_output') else str(preparation_result)
 
         # --- Step 2: Process Preparation Agent Output (String) ---
         # Ensure the output is a string. If it's not, convert it or handle the error.
@@ -254,16 +256,14 @@ async def run_posting_workflow() -> Dict[str, Any]:
         # --- Step 3: Run Posting Agent with Preparation Output String ---
 
         # Pass the string output directly as the input to the Posting Agent
-        posting_output = await run_flow_with_agent_fallback(
+        posting_result = await custom_runner.run_with_fallback(
             posting_agent,
             preparation_output_str, # <-- Pass the string directly
-            LLM_MODELS,
-            is_model_available,
-            get_model_by_name,
-            increment_usage,
             max_retries=max_retries,
             max_turns=max_turns
         )
+        
+        posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
 
         logger.info("Posting workflow completed.")
         # Return the Posting Agent's output directly

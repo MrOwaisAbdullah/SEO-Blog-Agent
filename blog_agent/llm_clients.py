@@ -128,66 +128,21 @@ def is_llm_error(e):
         return is_llm_error(orig)
     return False
 
+# This function is kept for backward compatibility but now uses the custom runner
 async def run_flow_with_agent_fallback(agent, input_data, LLM_MODELS, is_model_available, get_model_by_name, increment_usage, max_retries=3, max_turns=15):
-    current_agent = agent
-    current_input = input_data
-    session = None
-    last_error = None
-
-    while True:
-        print(f"[DEBUG] Entering fallback loop for agent: {getattr(current_agent, 'name', str(current_agent))}")
-        print(f"[DEBUG] Current input: {current_input}")
-        print(f"[DEBUG] Current session: {session}")
-        for attempt in range(max_retries):
-            for model_config in LLM_MODELS:
-                try:
-                    if not await is_model_available(model_config["provider"]):
-                        continue
-                    current_agent.model = get_model_by_name(model_config["name"])
-                    print(f"[Fallback] Trying agent '{current_agent.name}' with model '{model_config['name']}' (attempt {attempt+1})")
-                    if isinstance(current_input, list):
-                        print(f"[Debug] Input length for agent '{current_agent.name}': {len(current_input)}")
-                    from agents import Runner  # local import to avoid circular
-                    result = await Runner.run(current_agent, current_input, session=session, max_turns=max_turns)
-                    await increment_usage(model_config["provider"])
-                    print(f"[DEBUG] Agent '{current_agent.name}' run complete. Result: {result}")
-                    if hasattr(result, "handoff") and result.handoff:
-                        print(f"[DEBUG] Handoff detected. Handoff object: {result.handoff}")
-                        print(f"[DEBUG] Handoff agent: {getattr(result.handoff.agent, 'name', str(result.handoff.agent))}")
-                        current_agent = result.handoff.agent
-                        current_input = result.to_input_list() if hasattr(result, "to_input_list") else copy.deepcopy(current_input)
-                        session = getattr(result, "session", None)
-                        print(f"[Fallback] Handoff to agent '{current_agent.name}' with input: {current_input} and session: {session}")
-                        # After handoff, restart the while True loop with the new agent/input/session
-                        break  # break out of model loop, continue with new agent
-                    else:
-                        print(f"[DEBUG] No handoff. Returning result for agent '{current_agent.name}'")
-                        return result.final_output
-                except Exception as e:
-                    if is_llm_error(e):
-                        print(f"[Fallback] LLM/model error detected: {e} -- retrying fallback.")
-                        last_error = e
-                        continue  # fallback logic continues
-                    else:
-                        print(f"[Fallback] Non-LLM error: {e} -- not retrying fallback.")
-                        raise
-            else:
-                if attempt < max_retries - 1:
-                    wait_time = 5 * (2 ** attempt)
-                    print(f"[Fallback] All models failed for agent '{current_agent.name}' in attempt {attempt+1}, waiting {wait_time}s before retry...")
-                    import asyncio
-                    await asyncio.sleep(wait_time)
-                else:
-                    error_msg = f"All LLM providers failed for agent {current_agent.name} after {max_retries} retries"
-                    if last_error:
-                        error_msg += f". Last error: {str(last_error)}"
-                    print(f"[Fallback] {error_msg}")
-                    return {"error": error_msg}
-            # If we broke out of the model loop due to handoff, restart the while True loop
-            break
-        else:
-            error_msg = f"All LLM providers failed for agent {current_agent.name} after {max_retries} retries"
-            if last_error:
-                error_msg += f". Last error: {str(last_error)}"
-            print(f"[Fallback] {error_msg}")
-            return {"error": error_msg}
+    # Import the custom runner
+    from blog_agent.custom_runner import FallbackAgentRunner
+    custom_runner = FallbackAgentRunner()
+    
+    try:
+        # Use the custom runner's run_with_fallback method
+        result = await custom_runner.run_with_fallback(
+            agent, 
+            input_data, 
+            max_turns=max_turns, 
+            max_retries=max_retries
+        )
+        return result.final_output if hasattr(result, 'final_output') else result
+    except Exception as e:
+        print(f"[Fallback] Error in run_flow_with_agent_fallback: {e}")
+        return {"error": str(e)}
