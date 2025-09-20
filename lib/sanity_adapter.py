@@ -495,9 +495,11 @@ class SanityAdapter:
         print(f"DEBUG: First 100 chars: {content[:100]}")
 
         try:
-            # 1. Ensure default author exists (if needed)
-            author_id = "author_default"
-            # self.ensure_document_exists("author", author_id, {"name": "Default Author"})
+            # 1. Use existing author from your project (configured via environment variables)
+            author_id = os.environ.get("SANITY_DEFAULT_AUTHOR_ID", "default-author-id")
+            author_name = os.environ.get("SANITY_DEFAULT_AUTHOR_NAME", "Admin")
+            # Ensure the author exists (this will just verify it exists)
+            self.ensure_document_exists("author", author_id, {"name": author_name})
 
             # 2. Upload Image
             image_upload_result = self.upload_image(local_image_path)
@@ -595,7 +597,6 @@ class SanityAdapter:
                 logger.warning("Failed to resolve any category references.")
 
             # 6. Construct Document Object
-            published_at_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             full_url = f"https://blog-site-green-one.vercel.app/blog/{slug}"
 
             document = {
@@ -610,7 +611,6 @@ class SanityAdapter:
                     "alt": alt_text or f"Image for {title}"
                 },
                 "categories": category_refs,
-                "publishedAt": published_at_iso,
                 "content": content_blocks,
                 "faqs": formatted_faqs
             }

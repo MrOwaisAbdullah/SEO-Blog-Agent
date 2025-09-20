@@ -52,8 +52,10 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     4. **Validation**:
        - Ensure the input is a non-empty string relevant to social media content creation or scheduling.
        - Do not assume or generate inputs; use only sheet data.
+       - The keyword may contain names of tools or services (e.g., "Tavily - The Web Access Layer for AI Agents") which should be treated as the research subject, not as a reference to the tools you are using.
     5. **Output**:
        - Return the input as a plain string, either the keyword (e.g., "best coffee maker 2025") or the YouTube URL (e.g., "[invalid url, do not cite).
+       - Make sure to return the EXACT keyword as it appears in the sheet, without modification.
 
     **Tools:**
     - Google Sheets tool `get_keyword_tool`: Read/write access to "ContentSpark_Keywords".
@@ -63,6 +65,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     - Avoid hallucination by using only the sheet's data.
     - Log retries internally for debugging.
     - Confirm sheet update before outputting.
+    - Return the exact keyword from the sheet, even if it contains the names of tools you will be using in research.
 
     **Output (String):**
     "AI social media tools for agencies"
@@ -118,15 +121,22 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         **Role and Objective:**  
         You are the Researcher Agent, an SEO expert tasked with conducting dual-stream research based on the input provided (YouTube transcript if a URL is given, and keyword/topics analysis) to identify high-value, user-intent-driven content opportunities for blog posts, ensuring topical authority and AI citation potential.
 
+        **Important Clarification for Keyword Research:**
+        When conducting keyword research, you will receive a specific keyword or topic to research. The input will begin with "This is the keyword or URL to research:" followed by the actual keyword or URL. Even if the keyword contains the name of a tool or service you are also using (such as "Tavily"), you should treat the entire input as the research subject. For example, if you receive "This is the keyword or URL to research: Tavily - The Web Access Layer for AI Agents (Service Tool)", you should research this specific topic/service, not treat "Tavily" as a reference to the tool you are using.
+
+        **Example:**
+        If the input keyword is "This is the keyword or URL to research: Tavily - The Web Access Layer for AI Agents (Service Tool)", your task is to research this specific service/tool, not to use the name "Tavily" as a reference to the search tool you are using. You should use your research tools to find information about the Tavily service itself.
+
         **Inputs:**  
-        - **Keyword or Link**: A string that can be a keyword (e.g., "best coffee maker 2025") or a YouTube URL (e.g., "https://www.youtube.com/watch?v=example") provided by the Triage Agent.
+        - **Research Request**: A string that begins with "This is the keyword or URL to research:" followed by the actual keyword or URL to research. For example: "This is the keyword or URL to research: Tavily - The Web Access Layer for AI Agents (Service Tool)"
 
         **Instructions:**  
         1. **Chain-of-Thought Planning:**  
-        - Step 1: Identify the research goal (enhance content brief with YouTube insights if URL provided, or find high-value keywords).  
-        - Step 2: Select tools (Tavily primary, SerpApi/X API fallbacks).  
-        - Step 3: Analyze user intent for keywords (informational, navigational, transactional).  
-        - Step 4: Consolidate findings for topical authority and AI citation.  
+        - Step 1: Extract the actual keyword or URL from the input (everything after "This is the keyword or URL to research:")
+        - Step 2: Identify the research goal (enhance content brief with YouTube insights if URL provided, or find high-value keywords).  
+        - Step 3: Select tools (Tavily primary, SerpApi/X API fallbacks).  
+        - Step 4: Analyze user intent for keywords (informational, navigational, transactional).  
+        - Step 5: Consolidate findings for topical authority and AI citation.  
         2. **YouTube Research Process (if URL provided):**  
         - Fetch transcript via YouTube Data API v3 from the provided URL.  
         - Extract key topics/points (e.g., "Nespresso features").  
@@ -148,6 +158,9 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         4. **Output:**  
         - Return a dictionary with a "data" key containing a list of findings, where each finding includes fields like "main_topic/keyword", "summary", "source_urls", "source_titles", "user_intent", "search_volume", and "difficulty" as applicable.
 
+        **Efficient Data Handling:**
+        When conducting research, be mindful of context window limitations. Focus on the specific keyword or URL provided and avoid loading unnecessary data. Use targeted search queries to get relevant information without overwhelming the context.
+
         **Tools:**  
         - `tavily_search_tool`: Find relevant web pages (1 credit/query).  
         - `tavily_extract_tool`: Get clean text from URLs (1 credit/5 URLs).  
@@ -165,8 +178,17 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     output_agent = Agent(
         name="Output Agent",
         instructions="""
-        **Role and Objective:**\
+        **Role and Objective:**
         You are the Output Agent for ContentSpark AI, responsible for consolidating research findings into the `research_data` worksheet.
+
+        **Important Note:**
+        You may receive research findings about services or tools that share names with the tools you are using. For example, you might receive research about "Tavily" as a service, while also using a `tavily_search_tool`. Treat all research findings as content about the subject being researched, not as references to your tools.
+
+        **Efficient Data Handling Instructions:**
+        To avoid loading unnecessary data and preserve context window space:
+        1. **Before Adding Data**: Do not load existing records from the worksheet. Simply append new findings.
+        2. **When Adding New Findings**: Use `manage_sheet_data_tool` with action="append_row" to add each finding directly without loading existing data.
+        3. **Always**: Add data in the correct column order and format as specified in the example.
 
         **Instructions:**
         1. **Process Input**: Receive a dictionary with a "data" key containing a list of research findings from the Researcher Agent.
@@ -180,11 +202,12 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
           - Content Summary (from finding)
           - Source URLs (from finding)
           - Source Titles (from finding)
-          - Approve/Disapprove (set to "Approve" by default - user can manually change to "Disapprove" if needed)
+          - Approve/Disapprove (set to "Approve" by default - user can manually change to "Disapprove" if needed. Both "Approve" and "Approved" are considered approved status)
           - Generated (set to "no" for manual review)
         3. **Validation**:
         - Ensure all required fields are present or default to "N/A" where applicable.
         - Do not fabricate data; rely on the input findings.
+        - If the Keyword/Topic contains tool names (e.g., "Tavily"), store it exactly as provided.
 
         **Tools:**
         - `manage_sheet_data_tool`: Worksheet operations (e.g., action="append_row").
@@ -233,7 +256,8 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     # Step 2: For now, always use the Researcher Agent regardless of input type
     # (youtube_research_agent is commented out)
     research_agent = researcher_agent
-    research_input = input_string  # Pass the input directly (keyword or URL)
+    # Add context to make it clear this is the research subject
+    research_input = f"This is the keyword or URL to research: {input_string}\n\nPlease conduct thorough research on this topic and provide detailed findings."
 
     # Step 3: Run the appropriate Research Agent with fallback logic
     research_result = await custom_runner.run_with_fallback(
@@ -246,9 +270,12 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         return {"error": str(research_result)}
 
     # Step 4: Run Output Agent with research results
+    # Add context for the output agent as well
+    output_input = f"Here are the research findings that need to be consolidated into the research_data worksheet:\n\n{str(research_result)}\n\nPlease process these findings and add them to the worksheet using efficient data handling - append rows directly without loading all existing data."
+    
     output_result = await custom_runner.run_with_fallback(
         output_agent,
-        str(research_result),  # Pass the research results as a string
+        output_input,  # Pass the research results as a string
         max_turns=MAX_TURNS
     )
 

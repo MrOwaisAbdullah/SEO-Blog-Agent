@@ -182,7 +182,7 @@ async def generate_brief(api_key: str = Security(verify_api_key)):
     Or {"input_brief": { "keyword": "...", "outline": "...", ...}}
     """
 
-    agent_input = f"Generate content brief based on the first approved research findings that is not generated yet from the research_data worksheet."
+    agent_input = f"Generate content brief based on the first available research findings that is not generated yet from the research_data worksheet."
 
     try:
         # Use the global custom runner instance
@@ -202,14 +202,14 @@ async def generate_brief(api_key: str = Security(verify_api_key)):
             elif output.strip():  # If there's actual content
                 success_message = output
             else:
-                success_message = "Content brief generation completed, but no new briefs were created. This may be because there are no approved research findings in the research_data worksheet that haven't been generated yet."
+                success_message = "Content brief generation completed, but no new briefs were created. This may be because there are no available research findings in the research_data worksheet that haven't been generated yet."
         elif isinstance(result, str):
             if "error" in result.lower() or "no ungenerated rows found" in result.lower():
                 success_message = f"Content brief generation completed with issues: {result}"
             elif result.strip():  # If there's actual content
                 success_message = result
             else:
-                success_message = "Content brief generation completed, but no new briefs were created. This may be because there are no approved research findings in the research_data worksheet that haven't been generated yet."
+                success_message = "Content brief generation completed, but no new briefs were created. This may be because there are no available research findings in the research_data worksheet that haven't been generated yet."
         else:
             # For other types of results, try to extract meaningful information
             result_str = str(result)
@@ -218,7 +218,7 @@ async def generate_brief(api_key: str = Security(verify_api_key)):
             elif result_str.strip():
                 success_message = result_str
             else:
-                success_message = "Content brief generation completed, but no new briefs were created. This may be because there are no approved research findings in the research_data worksheet that haven't been generated yet."
+                success_message = "Content brief generation completed, but no new briefs were created. This may be because there are no available research findings in the research_data worksheet that haven't been generated yet."
             
         return {"status": "success", "message": success_message}
     except Exception as e:
@@ -235,7 +235,7 @@ async def generate_content(api_key: str = Security(verify_api_key)):
     """
 
     # You might want a more structured prompt based on the dict keys
-    agent_input = f"Generate content based on the first approved brief that is not generated yet from the content_briefs worksheet and add it to the generated_posts worksheet."
+    agent_input = f"Generate content based on the first available brief that is not generated yet from the content_briefs worksheet and add it to the generated_posts worksheet."
 
     try:
         # Use the global custom runner instance
@@ -255,14 +255,14 @@ async def generate_content(api_key: str = Security(verify_api_key)):
             elif output.strip():  # If there's actual content
                 success_message = output
             else:
-                success_message = "Content generation completed, but no new content was created. This may be because there are no approved briefs in the content_briefs worksheet that haven't been generated yet."
+                success_message = "Content generation completed, but no new content was created. This may be because there are no available briefs in the content_briefs worksheet that haven't been generated yet."
         elif isinstance(result, str):
             if "error" in result.lower() or "no ungenerated briefs found" in result.lower():
                 success_message = f"Content generation completed with issues: {result}"
             elif result.strip():  # If there's actual content
                 success_message = result
             else:
-                success_message = "Content generation completed, but no new content was created. This may be because there are no approved briefs in the content_briefs worksheet that haven't been generated yet."
+                success_message = "Content generation completed, but no new content was created. This may be because there are no available briefs in the content_briefs worksheet that haven't been generated yet."
         else:
             # For other types of results, try to extract meaningful information
             result_str = str(result)
@@ -271,7 +271,7 @@ async def generate_content(api_key: str = Security(verify_api_key)):
             elif result_str.strip():
                 success_message = result_str
             else:
-                success_message = "Content generation completed, but no new content was created. This may be because there are no approved briefs in the content_briefs worksheet that haven't been generated yet."
+                success_message = "Content generation completed, but no new content was created. This may be because there are no available briefs in the content_briefs worksheet that haven't been generated yet."
             
         return {"status": "success", "message": success_message}
     except Exception as e:

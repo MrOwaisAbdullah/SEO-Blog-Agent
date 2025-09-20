@@ -49,14 +49,17 @@ preparation_agent = Agent(
       - Use `manage_sheet_data_tool` with:
         - `action="get_all_records"`
         - `worksheet_name="generated_posts"`
-      - Filter the records to find the first row where:
-        - `Approve/Disapprove` = "Approve"
-        - `Published` = "No"
+      - **IMPORTANT**: Process the records efficiently without loading all data into your response. 
+      - Filter the returned records in your mind (don't include all records in your response) to find rows where:
+        - `Published` = "No" 
+        - `Approve/Disapprove` is either "Approve" or "Approved" (both are acceptable)
+      - Select ONLY the first matching row from this filtered list
       - If no such row is found, return:
         ```
         STATUS: NO_POSTS_FOUND
         MESSAGE: No approved, unpublished posts found.
         ```
+      - **IMPORTANT**: Do not include the full list of records in your response to avoid exceeding context limits.
 
     2. **Extract Data**
       - Extract: `Keyword/Topic`, `Generated Content`, `FAQs`, `Approve/Disapprove`, `Published`.

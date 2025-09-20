@@ -37,7 +37,7 @@ def get_cohere_client():
 # Gemini models share a single quota; other providers have their own
 LLM_MODELS = [
     {"name": "gemini-2.5-flash", "model": "gemini-2.5-flash", "client": get_gemini_client(), "provider": "gemini"},
-    {"name": "kimi-openrouter", "model": "moonshotai/kimi-k2:free", "client": get_openrouter_client(), "provider": "openrouter"},
+    {"name": "grok-4-fast-openrouter", "model": "x-ai/grok-4-fast:free", "client": get_openrouter_client(), "provider": "openrouter"},
     {"name": "gemini-2.5-flash-lite", "model": "gemini-2.5-flash-lite", "client": get_gemini_client(), "provider": "gemini"},
     {"name": "cohere", "model": "command-a-03-2025", "client": get_cohere_client(), "provider": "cohere"},
     {"name": "gemini-2.0-flash", "model": "gemini-2.0-flash", "client": get_gemini_client(), "provider": "gemini"},

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 import asyncio
 import copy
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from agents.run import AgentRunner
 
 # Custom runner that extends AgentRunner and adds fallback logic
@@ -17,7 +17,7 @@ class FallbackAgentRunner(AgentRunner):
         # Gemini models share a single quota; other providers have their own
         self.LLM_MODELS = [
             {"name": "gemini-2.5-flash", "model": "gemini-2.5-flash", "provider": "gemini"},
-            {"name": "kimi-openrouter", "model": "moonshotai/kimi-k2:free", "provider": "openrouter"},
+            {"name": "grok-4-fast-openrouter", "model": "x-ai/grok-4-fast:free", "provider": "openrouter"},
             {"name": "gemini-2.5-flash-lite", "model": "gemini-2.5-flash-lite", "provider": "gemini"},
             {"name": "cohere", "model": "command-a-03-2025", "client": self.get_cohere_client, "provider": "cohere"},
             {"name": "gemini-2.0-flash", "model": "gemini-2.0-flash", "provider": "gemini"},
@@ -27,6 +27,16 @@ class FallbackAgentRunner(AgentRunner):
         self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0}
         self.model_limits = {"gemini": 50, "openrouter": 1000, "cohere": 33}  # Approximate daily limits
         self.last_reset = datetime.now()
+        
+        # Provider performance tracking
+        self.provider_stats = {
+            "gemini": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "openrouter": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "cohere": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0}
+        }
+        
+        # Temporary provider unavailability tracking
+        self.provider_unavailable_until = {"gemini": None, "openrouter": None, "cohere": None}
 
     def get_gemini_client(self):
         from agents import AsyncOpenAI
@@ -84,12 +94,21 @@ class FallbackAgentRunner(AgentRunner):
         raise ValueError(f"Model name '{model_name}' not found in LLM_MODELS. Available models: {available_models}")
 
     async def is_model_available(self, provider_name):
-        """Check if the provider has quota remaining (buffer of 5 calls)."""
+        """Check if the provider has quota remaining and is not temporarily unavailable."""
         # Reset usage daily
         if (datetime.now() - self.last_reset).days >= 1:
             print(f"Resetting daily usage counters for all providers")
             self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0}
             self.last_reset = datetime.now()
+        
+        # Check if provider is temporarily unavailable
+        if self.provider_unavailable_until[provider_name] is not None:
+            if datetime.now() < self.provider_unavailable_until[provider_name]:
+                print(f"Provider {provider_name} is temporarily unavailable")
+                return False
+            else:
+                # Reset unavailability
+                self.provider_unavailable_until[provider_name] = None
         
         current_usage = self.model_usage.get(provider_name, 0)
         limit = self.model_limits.get(provider_name, 0)
@@ -135,6 +154,38 @@ class FallbackAgentRunner(AgentRunner):
             return self.is_llm_error(orig)
         return False
 
+    def is_temporary_error(self, e):
+        """Determine if an error is temporary and might be resolved by retrying."""
+        msg = str(e).lower()
+        # Temporary errors that might be resolved by waiting
+        temporary_keywords = ["rate limit", "quota", "429", "503", "timeout", "temporarily unavailable"]
+        for keyword in temporary_keywords:
+            if keyword in msg:
+                return True
+        # Check status codes
+        for code in ("429", "503"):
+            if hasattr(e, "code") and str(e.code) == code:
+                return True
+            if hasattr(e, "status") and str(e.status) == code:
+                return True
+        return False
+
+    def is_permanent_error(self, e):
+        """Determine if an error is permanent and retrying won't help."""
+        msg = str(e).lower()
+        # Permanent errors that won't be resolved by retrying
+        permanent_keywords = ["invalid api key", "forbidden", "403", "not found", "404"]
+        for keyword in permanent_keywords:
+            if keyword in msg:
+                return True
+        # Check status codes
+        for code in ("403", "404"):
+            if hasattr(e, "code") and str(e.code) == code:
+                return True
+            if hasattr(e, "status") and str(e.status) == code:
+                return True
+        return False
+
     async def run_with_fallback(
         self,
         agent,
@@ -157,8 +208,12 @@ class FallbackAgentRunner(AgentRunner):
             print(f"[DEBUG] Current input: {current_input}")
             print(f"[DEBUG] Current session: {session}")
             
+            # Sort models by performance (success rate) for this run
+            sorted_models = self._sort_models_by_performance()
+            
             for attempt in range(max_retries):
-                for model_config in self.LLM_MODELS:
+                # Try models in performance-sorted order
+                for model_config in sorted_models:
                     try:
                         if not await self.is_model_available(model_config["provider"]):
                             continue
@@ -166,6 +221,9 @@ class FallbackAgentRunner(AgentRunner):
                         print(f"[Fallback] Trying agent '{current_agent.name}' with model '{model_config['name']}' (attempt {attempt+1})")
                         if isinstance(current_input, list):
                             print(f"[Debug] Input length for agent '{current_agent.name}': {len(current_input)}")
+                        
+                        # Time the request for performance tracking
+                        start_time = datetime.now()
                         
                         # Use the parent class's run method
                         result = await super().run(
@@ -176,6 +234,10 @@ class FallbackAgentRunner(AgentRunner):
                             hooks=hooks,
                             session=session
                         )
+                        
+                        # Calculate response time and update stats
+                        response_time = (datetime.now() - start_time).total_seconds()
+                        await self._update_provider_stats(model_config["provider"], True, response_time)
                         
                         await self.increment_usage(model_config["provider"])
                         print(f"[DEBUG] Agent '{current_agent.name}' run complete. Result: {result}")
@@ -193,9 +255,28 @@ class FallbackAgentRunner(AgentRunner):
                             print(f"[DEBUG] No handoff. Returning result for agent '{current_agent.name}'")
                             return result
                     except Exception as e:
+                        # Calculate response time even for failed requests
+                        response_time = (datetime.now() - start_time).total_seconds() if 'start_time' in locals() else 0.0
+                        await self._update_provider_stats(model_config["provider"], False, response_time)
+                        
                         if self.is_llm_error(e):
                             print(f"[Fallback] LLM/model error detected: {e} -- retrying fallback.")
                             last_error = e
+                            
+                            # If it's a permanent error, don't retry with the same provider
+                            if self.is_permanent_error(e):
+                                print(f"[Fallback] Permanent error detected for provider {model_config['provider']}. Marking as temporarily unavailable.")
+                                # Mark provider as temporarily unavailable for 5 minutes
+                                self.provider_unavailable_until[model_config["provider"]] = datetime.now() + timedelta(minutes=5)
+                                continue  # Skip to next provider
+                            
+                            # If it's a rate limit error, mark as temporarily unavailable for longer
+                            if "rate limit" in str(e).lower() or "429" in str(e):
+                                print(f"[Fallback] Rate limit error detected for provider {model_config['provider']}. Marking as temporarily unavailable.")
+                                # Mark provider as temporarily unavailable for 10 minutes
+                                self.provider_unavailable_until[model_config["provider"]] = datetime.now() + timedelta(minutes=10)
+                                continue  # Skip to next provider
+                            
                             continue  # fallback logic continues
                         else:
                             print(f"[Fallback] Non-LLM error: {e} -- not retrying fallback.")
@@ -219,3 +300,43 @@ class FallbackAgentRunner(AgentRunner):
                     error_msg += f". Last error: {str(last_error)}"
                 print(f"[Fallback] {error_msg}")
                 raise Exception(error_msg)
+
+    def _sort_models_by_performance(self):
+        """Sort models by performance (success rate and response time)."""
+        def performance_score(provider_name):
+            stats = self.provider_stats.get(provider_name, {"success_count": 0, "error_count": 0, "avg_response_time": 0.0})
+            total_requests = stats["success_count"] + stats["error_count"]
+            if total_requests == 0:
+                # No data, return neutral score
+                return 0
+            success_rate = stats["success_count"] / total_requests
+            # Lower response time is better, so we invert it (higher score is better)
+            # We use 1.0 as a base to avoid negative scores
+            response_time_score = 1.0 / (1.0 + stats["avg_response_time"])
+            # Weighted score: 70% success rate, 30% response time
+            return 0.7 * success_rate + 0.3 * response_time_score
+
+        # Sort models by performance score (descending)
+        return sorted(self.LLM_MODELS, key=lambda m: performance_score(m["provider"]), reverse=True)
+
+    async def _update_provider_stats(self, provider_name, success, response_time):
+        """Update provider statistics for performance tracking."""
+        if provider_name not in self.provider_stats:
+            return
+            
+        stats = self.provider_stats[provider_name]
+        total_requests = stats["success_count"] + stats["error_count"]
+        
+        if success:
+            stats["success_count"] += 1
+        else:
+            stats["error_count"] += 1
+            
+        # Update average response time
+        if total_requests == 0:
+            stats["avg_response_time"] = response_time
+        else:
+            # Running average
+            stats["avg_response_time"] = (stats["avg_response_time"] * total_requests + response_time) / (total_requests + 1)
+            
+        print(f"[Stats] Provider {provider_name}: Success rate={(stats['success_count']/(stats['success_count']+stats['error_count'])):.2f}, Avg response time={stats['avg_response_time']:.2f}s")
