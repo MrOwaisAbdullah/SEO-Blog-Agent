@@ -2,7 +2,7 @@ from typing import Optional, Dict
 import logging
 import re
 from agents import Agent, function_tool, ModelSettings
-from tools.search_tools import web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
+from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
 from blog_agent.blog_agents import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from blog_agent.llm_clients import run_flow_with_agent_fallback
@@ -167,9 +167,8 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         - `tavily_crawl_tool`: Explore website structure (1 credit/5 URLs).  
         - `fetch_url_title`: Fetch URL titles and snippets.  
         - SerpApi `web_search_tool`(fallback): Keyword data.  
-        - X API `x_search_tool`(fallback): Trending discussions.
         """,
-        tools=[web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title],
+        tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title],
         hooks=MyAgentHooks(),
         model=custom_runner.get_model_by_name("cohere"),
         model_settings=ModelSettings(temperature=0.5),

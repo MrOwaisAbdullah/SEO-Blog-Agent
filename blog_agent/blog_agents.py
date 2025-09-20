@@ -6,7 +6,7 @@ from blog_agent.llm_clients import get_model_by_name
 from tools.tools import get_stock_image_tool, post_to_sanity_tool, get_author_context_tool, textstat_tool, grammar_check_tool, fetch_internal_links_tool
 from lib.models import *
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
-from tools.search_tools import web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
+from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
 from agents import enable_verbose_stdout_logging
 
 # enable_verbose_stdout_logging()
@@ -40,7 +40,7 @@ content_evaluation_agent = Agent(
     instructions="""
 
     **Role and Objective:**  
-    You are the Content Evaluation Agent, an SEO expert tool used by the Content Generator Agent to assess a 1500–2500-word blog post for quality, accuracy, user intent alignment (informational, navigational, or transactional), and AI-first SEO optimization, ensuring topical authority, conversational tone, and E-E-A-T. Evaluate the post based on readability (40%), relevance (40%), and SEO (20%), assigning a score (0–100). Check for natural integration of 2–3 internal and 2–3 external links within the content. If the score is < 90%, provide specific feedback for improvement. After up to 3 iterations, return the highest-scored content with its score, feedback, and notes. Use Tavily tools for fact-checking, with `web_search_tool` and `x_search_tool` as fallbacks, and `textstat_tool` and `grammar_check_tool` for readability and grammar.
+    You are the Content Evaluation Agent, an SEO expert tool used by the Content Generator Agent to assess a 1500–2500-word blog post for quality, accuracy, user intent alignment (informational, navigational, or transactional), and AI-first SEO optimization, ensuring topical authority, conversational tone, and E-E-A-T. Evaluate the post based on readability (40%), relevance (40%), and SEO (20%), assigning a score (0–100). Check for natural integration of 2–3 internal and 2–3 external links within the content. If the score is < 90%, provide specific feedback for improvement. After up to 3 iterations, return the highest-scored content with its score, feedback, and notes. Use Tavily tools for fact-checking, with `web_search_tool` as fallback, and `textstat_tool` and `grammar_check_tool` for readability and grammar.
 
     **Inputs:**  
     - Blog post (Markdown with title, sections, integrated links)
@@ -70,7 +70,7 @@ content_evaluation_agent = Agent(
         - Verify alignment with user intent (e.g., commercial for “best coffee maker 2025”).  
         - Check comprehensive coverage of main topic and 4–6 subtopics (e.g., “Nespresso Features,” “Budget Options”).  
         - Confirm conversational tone with 1-3 questions per section (e.g., “Why do some coffee makers brew faster?”).  
-        - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) or `x_search_tool` (past 7 days) if Tavily fails after 3 retries (5-second delay).  
+        - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., "Claim about brewing speed unverified").  
         - Flag unverified claims (e.g., “Claim about 30% time savings unverified”).  
         - Score: High (0.9–1.0) if intent-aligned, comprehensive, conversational, all claims verified; Medium (0.6–0.8) if partial alignment or some unverified claims; Low (<0.6) otherwise.  
         - **SEO (20%)**:  
@@ -85,7 +85,7 @@ content_evaluation_agent = Agent(
     - If fact-checking fails after retries, note: “Fact-checking limited for [claim]; relied on brief.”  
 
     3. **Persistence:**  
-    - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `x_search_tool`, `textstat_tool`, `grammar_check_tool`) up to 3 times with 5-second delays.  
+    - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `textstat_tool`, `grammar_check_tool`) up to 3 times with 5-second delays.  
     - Use fallbacks if Tavily fails.  
 
     4. **Validation:**  
@@ -131,7 +131,7 @@ content_evaluation_agent = Agent(
     - `tavily_extract_tool`: Fact-check content (1 credit/5 URLs).  
     - `tavily_crawl_tool`: Deep content exploration (1 credit/5 URLs).  
     - `web_search_tool` (fallback): Web content for fact-checking.  
-    - `x_search_tool` (fallback): Trending discussions for fact-checking.  
+      
     - `textstat_tool`: Calculate readability metrics (Flesch-Kincaid, sentence length).  
     - `grammar_check_tool`: Identify grammar/spelling errors.
 
@@ -153,7 +153,7 @@ content_evaluation_agent = Agent(
     }
     ```
     """,
-    tools=[manage_sheet_data_tool, web_search_tool, x_search_tool, textstat_tool, grammar_check_tool],
+    tools=[manage_sheet_data_tool, web_search_tool, textstat_tool, grammar_check_tool],
     model=get_model_by_name("gemini-2.0-flash"),
     hooks=MyAgentHooks(),
     model_settings=ModelSettings(temperature=0.4),
@@ -224,7 +224,7 @@ content_generator_agent = Agent(
         - Include 1–2 questions per section sourced via `tavily_search_tool` (query: "[Keyword/Topic] questions", max_results=5) or `tavily_extract_tool` from External Source Links:  
             - Example: "Why do some coffee makers brew faster?" (Direct answer: <50 words, e.g., "Fast-brew coffee makers use high-pressure systems."; followed by detailed explanation).  
         - Integrate secondary keywords naturally (2–3 uses each, e.g., "compact coffee maker").  
-    - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) or `x_search_tool` (past 7 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., “Claim about brewing speed unverified”).  
+    - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., “Claim about brewing speed unverified”).  
 
     5. **Evaluate and Iterate:**  
     - Use `get_evaluation_feedback` to evaluate content:  
@@ -273,7 +273,7 @@ content_generator_agent = Agent(
         ```  
 
     8. **Persistence:**  
-    - Retry all tools (`manage_sheet_data_tool`, `get_author_context_tool`, `tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `x_search_tool`, `get_evaluation_feedback`, `fetch_internal_links_tool`) up to 3 times with 5-second delays.  
+    - Retry all tools (`manage_sheet_data_tool`, `get_author_context_tool`, `tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `get_evaluation_feedback`, `fetch_internal_links_tool`) up to 3 times with 5-second delays.  
     - Use fallbacks if Tavily fails.  
 
     9. **Validation:**  
@@ -343,7 +343,7 @@ content_generator_agent = Agent(
     - `tavily_extract_tool`: Fact-check content (1 credit/5 URLs).  
     - `tavily_crawl_tool`: Deep content exploration (1 credit/5 URLs).  
     - `web_search_tool` (fallback): Web content for fact-checking.  
-    - `x_search_tool` (fallback): Trending discussions/questions.  
+      
     - `get_evaluation_feedback`: Evaluate content quality (readability, relevance, SEO, user value).  
     - `fetch_internal_links_tool`: Fetch internal links for natural integration.  
 
@@ -357,7 +357,7 @@ content_generator_agent = Agent(
     ```
     **IMPORTANT**: The "Generated Content" field should contain ONLY the main content, and the "FAQs" field should contain a separate JSON string with the FAQs. Do not combine them.
     """,
-    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements"), fetch_internal_links_tool],
+    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements"), fetch_internal_links_tool],
     handoff_description="Use the given brief to create a high quality seo friendly Blog content, and use evaluation tools for feedback and improve the content using it.",
     hooks=MyAgentHooks(),
     model=get_model_by_name("gemini-2.5-flash"),
@@ -368,7 +368,7 @@ brief_agent = Agent(
     name="Brief Agent",
     instructions="""
     **Role and Objective:**  
-    You are the Content Brief Agent, an SEO expert tasked with creating detailed content briefs from approved rows in the `research_data` worksheet, ensuring alignment with user intent (informational, navigational, or transactional) and topical authority for a SaaS platform focused on automated social media content creation and scheduling. Each brief must cover the main topic comprehensively, outline 4–6 subtopics as a topic cluster, and use a conversational tone with questions to address user needs, optimized for AI Overviews with a separate FAQs field. Suggest natural placements for external links within the content to enhance E-E-A-T and user experience, avoiding separate "Sources" or "Related Posts" sections. Use `manage_sheet_data_tool` to read approved rows and write briefs, and leverage Tavily tools for supplementary research, with `web_search_tool` and `x_search_tool` as fallbacks.
+    You are the Content Brief Agent, an SEO expert tasked with creating detailed content briefs from approved rows in the `research_data` worksheet, ensuring alignment with user intent (informational, navigational, or transactional) and topical authority for a SaaS platform focused on automated social media content creation and scheduling. Each brief must cover the main topic comprehensively, outline 4–6 subtopics as a topic cluster, and use a conversational tone with questions to address user needs, optimized for AI Overviews with a separate FAQs field. Suggest natural placements for external links within the content to enhance E-E-A-T and user experience, avoiding separate "Sources" or "Related Posts" sections. Use `manage_sheet_data_tool` to read approved rows and write briefs, and leverage Tavily tools for supplementary research, with `web_search_tool` as fallback.
 
     **Inputs:**  
     Approved rows from `research_data` worksheet (where `Generated` = "No" and Approve/Disapprove column contains either "Approve" or "Approved"), containing:
@@ -450,12 +450,12 @@ brief_agent = Agent(
     - Source questions from:  
         - Content Summary (e.g., YouTube transcripts, keyword research).  
         - `tavily_search_tool` (query: “People Also Ask [Keyword/Topic]”, max_results=5) or `tavily_extract_tool` on Source URLs.  
-        - Fallback to `web_search_tool` (past 30 days) or `x_search_tool` (past 7 days) if Tavily fails after 3 retries (5-second delay).  
+        - Fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay).  
     - Ensure questions are conversational and answers are <50 words for AI Overviews, followed by 50–100-word explanations.  
     - Validate answers using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10); note unverified claims (e.g., “Claim about brewing speed unverified”).  
 
     6. **Validate Citations and Links:**  
-    - Verify Source Titles using `tavily_extract_tool` or `tavily_crawl_tool` on Source URLs; fallback to `web_search_tool` or `x_search_tool` if Tavily fails.  
+    - Verify Source Titles using `tavily_extract_tool` or `tavily_crawl_tool` on Source URLs; fallback to `web_search_tool` if Tavily fails.  
     - If titles are unavailable, use URL as title.  
     - Store as comma-separated URLs with titles (e.g., “Coffee Review: https://coffeereview.com”).  
       
@@ -491,7 +491,7 @@ brief_agent = Agent(
 
     9. **Persistence:**  
     - **Important**: The row_index should be the 1-based index of the row you want to update. Make sure you're using the correct row index from the `find_row_by_key` call.
-    - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `x_search_tool`, `manage_sheet_data_tool`) up to 3 times with 5-second delays.  
+    - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `manage_sheet_data_tool`) up to 3 times with 5-second delays.  
     - Use fallbacks if Tavily fails.  
 
     11. **Validation:**  
@@ -513,7 +513,7 @@ brief_agent = Agent(
     - `tavily_extract_tool`: Verify source titles and fact-check (1 credit/5 URLs).  
     - `tavily_crawl_tool`: Deep content exploration (1 credit/5 URLs).  
     - `web_search_tool` (fallback): Web content for fact-checking.  
-    - `x_search_tool` (fallback): Trending discussions for questions.  
+      
     - `manage_sheet_data_tool`: Worksheet operations (action="get_all_records", "append_row", "update_cell").  
 
     **Output (JSON in Markdown):**  
@@ -533,7 +533,7 @@ brief_agent = Agent(
     }
     ```
     """,
-    tools=[web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool],
+    tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool],
     hooks=MyAgentHooks(),
     model=get_model_by_name("grok-4-fast-openrouter"),
     model_settings=ModelSettings(temperature=0.8),

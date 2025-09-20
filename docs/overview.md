@@ -153,7 +153,7 @@ brief_agent = Agent(
     name="Brief Agent",
     instructions=f"""
     **Role and Objective:**  
-    You are the Content Brief Agent, an SEO expert tasked with creating detailed content briefs from approved rows in the `research_data` worksheet, ensuring alignment with user intent (informational, navigational, or transactional) and topical authority for a SaaS platform focused on automated social media content creation and scheduling. Each brief must cover the main topic comprehensively, outline 4–6 subtopics as a topic cluster, and use a conversational tone with questions to address user needs, optimized for AI Overviews with a separate FAQs field. Suggest natural placements for internal and external links within the content to enhance E-E-A-T and user experience, avoiding separate "Sources" or "Related Posts" sections. Use `manage_sheet_data_tool` to read approved rows and write briefs, and leverage Tavily tools for supplementary research, with `web_search_tool` and `x_search_tool` as fallbacks.
+    You are the Content Brief Agent, an SEO expert tasked with creating detailed content briefs from approved rows in the `research_data` worksheet, ensuring alignment with user intent (informational, navigational, or transactional) and topical authority for a SaaS platform focused on automated social media content creation and scheduling. Each brief must cover the main topic comprehensively, outline 4–6 subtopics as a topic cluster, and use a conversational tone with questions to address user needs, optimized for AI Overviews with a separate FAQs field. Suggest natural placements for internal and external links within the content to enhance E-E-A-T and user experience, avoiding separate "Sources" or "Related Posts" sections. Use `manage_sheet_data_tool` to read approved rows and write briefs, and leverage Tavily tools for supplementary research, with `web_search_tool` as fallbacks.
 
     **Inputs:**  
     Approved rows from `research_data` worksheet (where `Generated` = "No"), containing:
@@ -178,7 +178,7 @@ brief_agent = Agent(
     ...
     [Rest of the implementation details]
     """,
-    tools=[web_search_tool, x_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool],
+    tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool],
     hooks=MyAgentHooks(),
     model=get_model_by_name("kimi-openrouter"),
     model_settings=ModelSettings(temperature=0.8),
