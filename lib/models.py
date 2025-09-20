@@ -45,7 +45,7 @@ class PostingOutput(BaseModel):
     """Output model for the Posting Agent."""
     status: str = Field(..., description="Publishing status, e.g., 'Post published to Sanity CMS'")
     internal_links_added: List[str] = Field(..., description="List of internal links added, e.g., ['[Title 1](/blog/slug1)']")
-    image_source: str = Field(..., description="Source of the image: Unsplash, Pexels, or Generated")
+    image_source: str = Field(..., description="Source of the image: Pexels or Generated")
     image_alt_text: str = Field(..., description="Keyword-rich alt text for the image")
     google_sheet_updated: str = Field(..., description="Status of Google Sheet update, e.g., 'Row added with slug [slug]'")
     error: Optional[str] = Field(None, description="Error message if publishing fails")

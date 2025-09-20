@@ -322,7 +322,7 @@ def grammar_check_tool(content: str):
 
 @function_tool
 def get_stock_image_tool(keyword: str):
-    """Fetches a stock image with alt text from Unsplash or Pexels."""
+    """Fetches a stock image with alt text from Pexels."""
     try:
         url = f"https://api.pexels.com/v1/search?query={keyword}&per_page=1"
         headers = {"Authorization": os.environ['PEXELS_API_KEY']}
@@ -330,16 +330,8 @@ def get_stock_image_tool(keyword: str):
         response.raise_for_status()
         photo = response.json()['photos'][0]
         return {"url": photo['src']['medium'], "alt_text": f"{keyword} stock image"}
-
     except:
-        try:
-            url = f"https://api.unsplash.com/search/photos?query={keyword}&client_id={os.environ['UNSPLASH_API_KEY']}"
-            response = requests.get(url)
-            response.raise_for_status()
-            photo = response.json()['results'][0]
-            return {"url": photo['urls']['regular'], "alt_text": f"{keyword} stock image"}
-        except:
-            return {"error": "Failed to fetch stock image"}
+        return {"error": "Failed to fetch stock image from Pexels"}
 
 @function_tool
 def generate_image_tool(keyword: str):
