@@ -8,7 +8,7 @@ from language_tool_python import LanguageTool
 from huggingface_hub import InferenceClient
 import time
 from PIL import Image
-import io
+from io import BytesIO
 from lib.sanity_adapter import SanityAdapter
 from dotenv import load_dotenv
 import tempfile
@@ -351,21 +351,21 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        # Updated payload to match Freepik API documentation
         payload = {
             "prompt": prompt,
-            "aspect_ratio": "widescreen_16_9",
-            "styling": {
-                "effects": {
-                    "framing": "horizontal"
-                }
-            }
+            "aspect_ratio": "widescreen_16_9"
         }
+        # Debug: Print the payload for troubleshooting
+        print(f"Freepik API Payload: {json.dumps(payload, indent=2)}")
         response = requests.post(url, json=payload, headers=headers)
+        print(f"Freepik API Response Status: {response.status_code}")
+        print(f"Freepik API Response Text: {response.text}")
         response.raise_for_status()
         task_response = response.json()
         
         # Check if we got an immediate result or need to poll
-        if "data" in task_response and "generated" in task_response["data"]:
+        if "data" in task_response and "generated" in task_response["data"] and task_response["data"]["generated"]:
             # Immediate result
             image_url = task_response["data"]["generated"][0]
             image_response = requests.get(image_url)
@@ -383,27 +383,31 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
 
             # Poll for completion
             poll_url = f"https://api.freepik.com/v1/ai/text-to-image/flux-dev/{task_id}"
-            for _ in range(15):  # Poll up to 15 times
-                time.sleep(15)  # Wait 15 seconds between polls
-                poll_response = requests.get(poll_url, headers=headers)
-                poll_response.raise_for_status()
-                task_status = poll_response.json()
-                
-                if "data" in task_status and "status" in task_status["data"]:
-                    status = task_status["data"]["status"]
-                    if status == "COMPLETED" and "generated" in task_status["data"]:
-                        image_url = task_status["data"]["generated"][0]
-                        image_response = requests.get(image_url)
-                        image_response.raise_for_status()
-                        image = Image.open(BytesIO(image_response.content))
-                        # Use a cross-platform temporary directory
-                        import tempfile
-                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                            image.save(tmp.name)
-                            file_path = tmp.name
-                        return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Freepik"}
-                    elif status == "FAILED":
-                        return {"error": "Freepik image generation failed"}
+            for _ in range(30):  # Poll up to 30 times (increased from 15)
+                time.sleep(10)  # Wait 10 seconds between polls (reduced from 15)
+                try:
+                    poll_response = requests.get(poll_url, headers=headers)
+                    poll_response.raise_for_status()
+                    task_status = poll_response.json()
+                    
+                    if "data" in task_status and "status" in task_status["data"]:
+                        status = task_status["data"]["status"]
+                        if status == "COMPLETED" and "generated" in task_status["data"] and task_status["data"]["generated"]:
+                            image_url = task_status["data"]["generated"][0]
+                            image_response = requests.get(image_url)
+                            image_response.raise_for_status()
+                            image = Image.open(BytesIO(image_response.content))
+                            # Use a cross-platform temporary directory
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                                image.save(tmp.name)
+                                file_path = tmp.name
+                            return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Freepik"}
+                        elif status == "FAILED":
+                            return {"error": "Freepik image generation failed"}
+                except Exception as poll_error:
+                    print(f"Error polling Freepik API: {poll_error}")
+                    continue
                 
         return {"error": "Freepik image generation timed out or invalid response"}
     except Exception as e:

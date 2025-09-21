@@ -4,7 +4,7 @@ import logging
 from agents import Agent, ModelSettings, AgentHooks, handoff
 from tools.tools import post_to_sanity_tool, fetch_internal_links_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
-from blog_agent.image_agent import get_blog_image_tool  # Import the new image agent tool
+from blog_agent.image_agent import image_selection_agent  # Import the new image agent tool
 from typing import Dict, Any, List, Optional
 import json
 import asyncio
@@ -12,9 +12,8 @@ import copy
 
 # Import your runner and model functions
 # Adjust these imports based on your project structure
-from blog_agent.llm_clients import (
+from blog_agent.custom_runner import (
     run_flow_with_agent_fallback,
-    LLM_MODELS,
     is_model_available,
     get_model_by_name,
     increment_usage
@@ -84,7 +83,7 @@ preparation_agent = Agent(
       - External links: Use any in `Generated Content` or leave `EXTERNAL_LINKS_MD` empty.
 
     4. **Fetch Image**
-      - Use `get_blog_image_tool` with `TITLE` and `Generated Content` to get a high-quality, relevant image.
+      - Use `image_selection_agent` with `TITLE` and `Generated Content` to get a high-quality, relevant image.
       - This tool will generate an AI image first, evaluate its quality, and use stock photos as fallback.
 
     5. **Derive Fields**
@@ -135,8 +134,9 @@ preparation_agent = Agent(
     - `manage_sheet_data_tool`
     - `fetch_internal_links_tool`
     - `get_stock_image_tool`
+    - `get_blog_image_tool`
     """,
-    tools=[manage_sheet_data_tool, fetch_internal_links_tool, get_blog_image_tool],
+    tools=[manage_sheet_data_tool, fetch_internal_links_tool, image_selection_agent.as_tool(tool_name="get_blog_image_tool", tool_description="Selects or generates a relevant image for blog posts")],
     hooks=MyAgentHooks(),
     model="gemini-2.0-flash",
     model_settings=ModelSettings(temperature=0.5),
@@ -202,8 +202,26 @@ posting_agent = Agent(
       - `cell_range="G[row_index]"` (where [row_index] is the row number from the previous step)
       - `data=[["Yes"]]` (note the double brackets for a 2D array - this is required for update_cells)
     
+    Step 6: Record published post details in the published_posts worksheet:
+    - After successfully posting to Sanity, record the published post details in the `published_posts` worksheet
+    - Use `manage_sheet_data_tool` with:
+      - `action="append_row"`
+      - `worksheet_name="published_posts"`
+      - `row_values` should contain 4 columns in this order:
+        1. Keyword/Topic: "[SOURCE_KEYWORD_TOPIC]"
+        2. Featured Image URL: "[IMAGE_URL]" (the URL from Sanity or the local path)
+        3. Post URL: "https://owaisabdullah.dev/blog/[SLUG]" (constructed by joining the base URL with the slug)
+        4. Error: "" (empty string if successful, error message if failed)
+    - Example tool call:
+      {
+        "action": "append_row",
+        "worksheet_name": "published_posts",
+        "row_values": ["Brand consistency in social media", "https://cdn.sanity.io/images/...", "https://owaisabdullah.dev/blog/brand-consistency-in-social-media", ""]
+      }
+    
     IMPORTANT: If you don't call post_to_sanity_tool, you have FAILED at your job.
     IMPORTANT: You must update the Google Sheet after posting to Sanity.
+    IMPORTANT: You must record the published post details in the published_posts worksheet.
     """,
     tools=[post_to_sanity_tool, manage_sheet_data_tool],
     hooks=MyAgentHooks(),

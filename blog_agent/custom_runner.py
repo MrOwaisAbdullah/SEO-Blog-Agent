@@ -1,10 +1,8 @@
 from agents import RunResult, RunHooks
 from agents.models.interface import Model
-from agents.model_settings import ModelSettings
 from agents.exceptions import ModelBehaviorError, MaxTurnsExceeded
 from typing import Any, Dict, List, Optional, Union
 import asyncio
-import copy
 import os
 from datetime import datetime, timedelta
 from agents.run import AgentRunner

@@ -1,8 +1,5 @@
-from agents import Agent, ModelSettings, AgentHooks, RunContextWrapper, handoff, Tool
-from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-from agents.extensions.handoff_filters import remove_all_tools
-from agents.handoffs import HandoffInputData
-from blog_agent.llm_clients import get_model_by_name
+from agents import Agent, ModelSettings, AgentHooks,RunContextWrapper, handoff, Tool
+from blog_agent.custom_runner import get_model_by_name
 from tools.tools import get_stock_image_tool, post_to_sanity_tool, get_author_context_tool, textstat_tool, grammar_check_tool, fetch_internal_links_tool
 from lib.models import *
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
@@ -67,22 +64,22 @@ content_evaluation_agent = Agent(
         - Check for mobile-first readability: short paragraphs (2–3 sentences), bullet points, 16px font equivalent.  
         - Score: High (0.9–1.0) if Flesch-Kincaid ≥ 60, <5 grammar errors, mobile-friendly; Medium (0.6–0.8) if 50–59 or 5–10 errors; Low (<0.6) otherwise.  
         - **Relevance (40%)**:  
-        - Verify alignment with user intent (e.g., commercial for “best coffee maker 2025”).  
-        - Check comprehensive coverage of main topic and 4–6 subtopics (e.g., “Nespresso Features,” “Budget Options”).  
-        - Confirm conversational tone with 1-3 questions per section (e.g., “Why do some coffee makers brew faster?”).  
+        - Verify alignment with user intent (e.g., commercial for "best coffee maker 2025").  
+        - Check comprehensive coverage of main topic and 4–6 subtopics (e.g., "Nespresso Features," "Budget Options").  
+        - Confirm conversational tone with 1-3 questions per section (e.g., "Why do some coffee makers brew faster?").  
         - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., "Claim about brewing speed unverified").  
-        - Flag unverified claims (e.g., “Claim about 30% time savings unverified”).  
+        - Flag unverified claims (e.g., "Claim about 30% time savings unverified").  
         - Score: High (0.9–1.0) if intent-aligned, comprehensive, conversational, all claims verified; Medium (0.6–0.8) if partial alignment or some unverified claims; Low (<0.6) otherwise.  
         - **SEO (20%)**:  
         - Verify word count (1500–2500 words).  
         - Check primary/secondary keyword usage (2–3 uses each, natural).  
         - Confirm FAQs (5–7 questions in JSON, direct answers <50 words for AI Overviews).  
-        - Verify 2–3 internal links (e.g., “Similar to [AI Tips](/blog/ai-tips)”) and 2–3 external links (e.g., “Per [Coffee Review](https://coffeereview.com)”) are naturally integrated, contextually relevant, and enhance E-E-A-T.  
+        - Verify 2–3 internal links (e.g., "Similar to [AI Tips](/blog/ai-tips)") and 2–3 external links (e.g., "Per [Coffee Review](https://coffeereview.com)") are naturally integrated, contextually relevant, and enhance E-E-A-T.  
         - Score: High (0.9–1.0) if all criteria met, including natural link integration; Medium (0.6–0.8) if 1-3 missing or links appear forced; Low (<0.6) otherwise.  
     - Calculate total score: `(0.4 * readability_score + 0.4 * relevance_score + 0.2 * seo_score) * 100`.  
-    - If score < 90% and iteration count < 3, provide specific feedback (e.g., “Simplify paragraph 3 for readability,” “Add keyword ‘compact coffee maker’ in section 2,” “Improve link placement in section 2 for natural flow”).  
-    - If score ≥ 90% or iteration count = 3, return the highest-scored content, FAQs, score, feedback, and notes (e.g., “Fact-checking limited; relied on brief”).  
-    - If fact-checking fails after retries, note: “Fact-checking limited for [claim]; relied on brief.”  
+    - If score < 90% and iteration count < 3, provide specific feedback (e.g., "Simplify paragraph 3 for readability," "Add keyword 'compact coffee maker' in section 2," "Improve link placement in section 2 for natural flow").  
+    - If score ≥ 90% or iteration count = 3, return the highest-scored content, FAQs, score, feedback, and notes (e.g., "Fact-checking limited; relied on brief").  
+    - If fact-checking fails after retries, note: "Fact-checking limited for [claim]; relied on brief."  
 
     3. **Persistence:**  
     - Retry all tools (`tavily_search_tool`, `tavily_extract_tool`, `tavily_crawl_tool`, `web_search_tool`, `textstat_tool`, `grammar_check_tool`) up to 3 times with 5-second delays.  
@@ -143,8 +140,13 @@ content_evaluation_agent = Agent(
     {
     "status": "success",
     "Keyword/Topic": "best coffee maker 2025",
-    "HighestScoredContent": "# Best Coffee Makers 2025 - Your Ultimate Guide to Brewing Perfection\n## Introduction\nEver wondered which coffee maker brews the perfect cup for your busy mornings? [150–200 words]\n## Nespresso Features\nWhy do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, link to /blog/ai-tips]\n",
-    "FAQs": "[{\"question\": \"Can a coffee maker save you time?\", \"answer\": \"Yes, models like Nespresso automate brewing. [100–150 words]\"}, {\"question\": \"How do you choose a coffee maker for small spaces?\", \"answer\": \"Look for compact models. [100–150 words]\"}]",
+    "HighestScoredContent": "# Best Coffee Makers 2025 - Your Ultimate Guide to Brewing Perfection
+## Introduction
+Ever wondered which coffee maker brews the perfect cup for your busy mornings? [150–200 words]
+## Nespresso Features
+Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, link to /blog/ai-tips]
+",
+    "FAQs": "[{"question": "Can a coffee maker save you time?", "answer": "Yes, models like Nespresso automate brewing. [100–150 words]"}, {"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models. [100–150 words]"}]",
     "Score": 92,
     "Feedback": "",
     "Notes": "",
@@ -163,7 +165,7 @@ content_generator_agent = Agent(
     name="Content Generator Agent",
     instructions="""
     **Role and Objective:**  
-    You are the Content Generator Agent, an SEO expert tasked with creating a 1500–2500-word SEO-optimized blog post from the first approved brief in the `content_briefs` worksheet, focusing on fulfilling user intent (informational, navigational, or transactional) to establish topical authority for a SaaS platform focused on automated social media content creation and scheduling. The post must cover the main topic comprehensively, include 4–6 detailed subtopics as a topic cluster, and use a conversational tone with questions from platforms like Quora, Reddit, and Google’s “People Also Ask.” Naturally integrate 1-3 internal and 1-3 external links within the content, avoiding separate "Sources" or "Related Posts" sections. Optimize for AI Overviews with direct answers (<50 words) in a separate FAQs field and ensure mobile-first readability and E-E-A-T. Use `manage_sheet_data_tool` to read from `content_briefs`, update the `Generated` column, and write to `generated_posts`. Use `get_evaluation_feedback` to evaluate and improve the content until a quality score ≥ 90% or after 3 iterations.
+    You are the Content Generator Agent, an SEO expert tasked with creating a 1500–2500-word SEO-optimized blog post from the first approved brief in the `content_briefs` worksheet, focusing on fulfilling user intent (informational, navigational, or transactional) to establish topical authority for a SaaS platform focused on automated social media content creation and scheduling. The post must cover the main topic comprehensively, include 4–6 detailed subtopics as a topic cluster, and use a conversational tone with questions from platforms like Quora, Reddit, and Google's "People Also Ask." Naturally integrate 1-3 internal and 1-3 external links within the content, avoiding separate "Sources" or "Related Posts" sections. Optimize for AI Overviews with direct answers (<50 words) in a separate FAQs field and ensure mobile-first readability and E-E-A-T. Use `manage_sheet_data_tool` to read from `content_briefs`, update the `Generated` column, and write to `generated_posts`. Use `get_evaluation_feedback` to evaluate and improve the content until a quality score ≥ 90% or after 3 iterations.
 
     **Inputs:**  
     Rows from `content_briefs` worksheet (where `Generated` = "No"), containing:
@@ -224,7 +226,7 @@ content_generator_agent = Agent(
         - Include 1–2 questions per section sourced via `tavily_search_tool` (query: "[Keyword/Topic] questions", max_results=5) or `tavily_extract_tool` from External Source Links:  
             - Example: "Why do some coffee makers brew faster?" (Direct answer: <50 words, e.g., "Fast-brew coffee makers use high-pressure systems."; followed by detailed explanation).  
         - Integrate secondary keywords naturally (2–3 uses each, e.g., "compact coffee maker").  
-    - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., “Claim about brewing speed unverified”).  
+    - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., "Claim about brewing speed unverified").  
 
     5. **Evaluate and Iterate:**  
     - Use `get_evaluation_feedback` to evaluate content:  
@@ -233,7 +235,7 @@ content_generator_agent = Agent(
         - **SEO (20%)**: Word count (1500–2500), FAQs (5–7 questions), keyword usage (2–3 per keyword), natural link integration.  
         - **High Value to User (20%)**: Answers user queries comprehensively, with natural links enhancing context.  
     - Calculate score: `(0.3 * readability_score + 0.3 * relevance_score + 0.2 * seo_score + 0.2 * value_score) * 100`.  
-    - If score < 90% and iteration count < 3, revise content based on feedback (e.g., “Simplify paragraph 3,” “Add keyword ‘smart brewing’,” “Improve link placement in section 2”).  
+    - If score < 90% and iteration count < 3, revise content based on feedback (e.g., "Simplify paragraph 3," "Add keyword 'smart brewing'," "Improve link placement in section 2").  
     - Track the highest-scored content and its score across iterations.  
     - If score ≥ 90% or after 3 iterations, proceed with the highest-scored content.  
     - Retry `get_evaluation_feedback` up to 3 times with 5-second delays if it fails.  
@@ -253,7 +255,9 @@ content_generator_agent = Agent(
         {
         "worksheet_name": "generated_posts",
         "action": "append_row",
-        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...\n## Introduction...\nNespresso excels, per [Coffee Review](https://coffeereview.com)...", "[{\"question\": \"Can a coffee maker save time?\", \"answer\": \"Yes, models like Nespresso...\"}]", "92", "Generated", "", "No"]
+        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...
+## Introduction...
+Nespresso excels, per [Coffee Review](https://coffeereview.com)...", "[{"question": "Can a coffee maker save time?", "answer": "Yes, models like Nespresso..."}]", "92", "Generated", "", "No"]
         }
         ```  
     - **IMPORTANT**: All values in `row_values` must be strings, including numbers like Quality Score. Convert integers to strings (e.g., `92` should be `"92"`).
@@ -347,9 +351,21 @@ content_generator_agent = Agent(
     - `get_evaluation_feedback`: Evaluate content quality (readability, relevance, SEO, user value).  
     - `fetch_internal_links_tool`: Fetch internal links for natural integration.  
 
-    **Output (JSON in Markdown):**  \n\n    ```json\n    {\n    "status": "success",\n    "Keyword/Topic": "best coffee maker 2025",\n    "Generated Content": "## Introduction\nEver wondered which coffee maker brews the perfect cup for your busy mornings? [150–200 words]\n## Nespresso Features\nWhy do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, link to /blog/ai-tips]\n",\n    "FAQs": "[{\\\"question\\\": \\\"Can a coffee maker save you time?\\\", \\\"answer\\\": \\\"Yes, models like Nespresso automate brewing. [100–150 words]\\\"}, {\\\"question\\\": \\\"How do you choose a coffee maker for small spaces?\\\", \\\"answer\\\": \\\"Look for compact models. [100–150 words]\\\"}]\",\n    "Quality Score": "92",\n
+    **Output (JSON in Markdown):**  
+
+    ```json
+    {
+    "status": "success",
+    "Keyword/Topic": "best coffee maker 2025",
+    "Generated Content": "## Introduction
+Ever wondered which coffee maker brews the perfect cup for your busy mornings? [150–200 words]
+## Nespresso Features
+Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, link to /blog/ai-tips]
+",
+    "FAQs": "[{"question": "Can a coffee maker save you time?", "answer": "Yes, models like Nespresso automate brewing. [100–150 words]"}, {"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models. [100–150 words]"}]",
+    "Quality Score": "92",
     "Status": "Generated",
-    "Approve/Disapprove": "",
+    "Approve/Disapprove": "Approved" (By default its approved user can change it later),
     "Published": "No",
     "errors": [],
     "warnings": []
@@ -423,10 +439,10 @@ brief_agent = Agent(
 
     4. **Generate Brief Content:**  
     - Create a content brief in Markdown with:  
-        - **Title (H1)**: Include primary keyword, intent-driven (e.g., “Best Coffee Makers 2025: Brew Your Perfect Cup”).  
-        - **Introduction**: 100–150 words, front-loading primary keyword, conversational tone (e.g., “Struggling to find a coffee maker that fits your morning rush?”), aligned with user intent.  
-        - **Main Sections**: 4–6 H2 headings based on Content Summary (e.g., “Nespresso Features,” “Budget Options”), each with 50–100-word descriptions and 1–2 conversational questions (e.g., “What makes Nespresso stand out?”).  
-        - **Link Suggestions**: For each section, suggest 1–2 placements for external links to be naturally integrated (e.g., “In ‘Nespresso Features,’ link to [AI Tips](/blog/ai-tips) when discussing automation; cite [Coffee Review](https://coffeereview.com) for Nespresso quality.”).  
+        - **Title (H1)**: Include primary keyword, intent-driven (e.g., "Best Coffee Makers 2025: Brew Your Perfect Cup").  
+        - **Introduction**: 100–150 words, front-loading primary keyword, conversational tone (e.g., "Struggling to find a coffee maker that fits your morning rush?"), aligned with user intent.  
+        - **Main Sections**: 4–6 H2 headings based on Content Summary (e.g., "Nespresso Features," "Budget Options"), each with 50–100-word descriptions and 1–2 conversational questions (e.g., "What makes Nespresso stand out?").  
+        - **Link Suggestions**: For each section, suggest 1–2 placements for external links to be naturally integrated (e.g., "In 'Nespresso Features,' link to [AI Tips](/blog/ai-tips) when discussing automation; cite [Coffee Review](https://coffeereview.com) for Nespresso quality.").  
     - Use brand context (tone, emojis, no banned words).  
 
     - **Writing Style Guidelines**:  
@@ -449,15 +465,15 @@ brief_agent = Agent(
         ```  
     - Source questions from:  
         - Content Summary (e.g., YouTube transcripts, keyword research).  
-        - `tavily_search_tool` (query: “People Also Ask [Keyword/Topic]”, max_results=5) or `tavily_extract_tool` on Source URLs.  
+        - `tavily_search_tool` (query: "People Also Ask [Keyword/Topic]", max_results=5) or `tavily_extract_tool` on Source URLs.  
         - Fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay).  
     - Ensure questions are conversational and answers are <50 words for AI Overviews, followed by 50–100-word explanations.  
-    - Validate answers using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10); note unverified claims (e.g., “Claim about brewing speed unverified”).  
+    - Validate answers using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10); note unverified claims (e.g., "Claim about brewing speed unverified").  
 
     6. **Validate Citations and Links:**  
     - Verify Source Titles using `tavily_extract_tool` or `tavily_crawl_tool` on Source URLs; fallback to `web_search_tool` if Tavily fails.  
     - If titles are unavailable, use URL as title.  
-    - Store as comma-separated URLs with titles (e.g., “Coffee Review: https://coffeereview.com”).  
+    - Store as comma-separated URLs with titles (e.g., "Coffee Review: https://coffeereview.com").  
       
 
     7. **Save to `content_briefs`:**  
@@ -473,7 +489,9 @@ brief_agent = Agent(
         {
         "worksheet_name": "content_briefs",
         "action": "append_row",
-        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...\n## Introduction...\n[Link to AI Tips in Nespresso section]", "[{\"question\": \"How do you choose a coffee maker?\", \"answer\": \"Look for compact models...\"}]", "Coffee Review: https://coffeereview.com,Top 10: https://example.com", "Transcript discusses Nespresso...", "Approve", "No"]
+        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...
+## Introduction...
+[Link to AI Tips in Nespresso section]", "[{"question": "How do you choose a coffee maker?", "answer": "Look for compact models..."}]", "Coffee Review: https://coffeereview.com,Top 10: https://example.com", "Transcript discusses Nespresso...", "Approve", "No"]
         }
         ```  
     - Retry up to 3 times with 5-second delays; if it fails, include:  
@@ -522,9 +540,16 @@ brief_agent = Agent(
     {
     "status": "success",
     "Keyword/Topic": "best coffee maker 2025",
-    "Brief Content": "# Best Coffee Makers 2025 Brew Your Perfect Cup\n## Introduction\nStruggling to find a coffee maker that fits your morning rush?\n## Nespresso Features\nWhat makes Nespresso stand out?\n## Budget Options\nHow do budget coffee makers compare?\n"
+    "Brief Content": "# Best Coffee Makers 2025 Brew Your Perfect Cup
+## Introduction
+Struggling to find a coffee maker that fits your morning rush?
+## Nespresso Features
+What makes Nespresso stand out?
+## Budget Options
+How do budget coffee makers compare?
+"
     }
-    "FAQs": "[{\"question\": \"How do you choose a coffee maker for small spaces?\", \"answer\": \"Look for compact models like Nespresso. [50–100 words]\"}, {\"question\": \"Can a coffee maker save time?\", \"answer\": \"Yes, models with auto-brew save time. [50–100 words]\"}]",
+    "FAQs": "[{"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models like Nespresso. [50–100 words]"}, {"question": "Can a coffee maker save time?", "answer": "Yes, models with auto-brew save time. [50–100 words]"}]",
     "External Source Links": "Coffee Review: https://coffeereview.com,Top 10 Coffee Makers: https://example.com",
     "Content Summary": "Transcript discusses Nespresso features; web sources highlight Keurig ease.",
     "Generated": "No",

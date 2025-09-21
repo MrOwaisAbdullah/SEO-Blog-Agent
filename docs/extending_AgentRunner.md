@@ -26,9 +26,9 @@ I've successfully implemented the custom runner that extends the `AgentRunner` c
 - **Benefit**: When an agent performs a handoff, the receiving agent automatically uses the same fallback logic
 
 ### 5. Backward Compatibility
-- **File**: `llm_clients.py`
-- **Changes**: Kept the `run_flow_with_agent_fallback` function for backward compatibility
-- **Implementation**: Updated it to delegate to the custom runner
+- **File**: `blog_agent/custom_runner.py`
+- **Changes**: Moved all LLM client functionality from `llm_clients.py` to `custom_runner.py`
+- **Implementation**: All LLM client functions are now available directly from the custom runner
 - **Benefit**: Existing code continues to work without modification
 
 ### Key Benefits of These Changes

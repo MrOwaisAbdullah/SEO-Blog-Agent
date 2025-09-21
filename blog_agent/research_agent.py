@@ -5,7 +5,6 @@ from agents import Agent, function_tool, ModelSettings
 from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
 from blog_agent.blog_agents import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-from blog_agent.llm_clients import run_flow_with_agent_fallback
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
 from blog_agent.custom_runner import FallbackAgentRunner
 
@@ -199,14 +198,15 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
           - Difficulty (from finding, or "N/A" for YouTube)
           - User Intent (from finding, or "N/A" for YouTube)
           - Content Summary (from finding)
-          - Source URLs (from finding)
-          - Source Titles (from finding)
+          - Source URLs (from finding) - IMPORTANT: Convert list of URLs to a single comma-separated string
+          - Source Titles (from finding) - IMPORTANT: Convert list of titles to a single comma-separated string
           - Approve/Disapprove (set to "Approve" by default - user can manually change to "Disapprove" if needed. Both "Approve" and "Approved" are considered approved status)
           - Generated (set to "no" for manual review)
         3. **Validation**:
         - Ensure all required fields are present or default to "N/A" where applicable.
         - Do not fabricate data; rely on the input findings.
         - If the Keyword/Topic contains tool names (e.g., "Tavily"), store it exactly as provided.
+        - IMPORTANT: When passing lists (like Source URLs or Source Titles), convert them to comma-separated strings before passing to the tool.
 
         **Tools:**
         - `manage_sheet_data_tool`: Worksheet operations (e.g., action="append_row").
@@ -223,8 +223,8 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
             "0.5",
             "commercial",
             "A brief summary of the content",
-            ["https://example.com"],
-            ["Example Title"],
+            "https://example.com, https://example2.com",  // Convert list to comma-separated string
+            "Example Title, Another Title",  // Convert list to comma-separated string
             "Approve",
             "no"
           ]
