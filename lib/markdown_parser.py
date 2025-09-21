@@ -1,6 +1,6 @@
 """
 Enhanced Markdown to Sanity Portable Text Converter
-With comprehensive styling support and debugging
+With comprehensive styling support, image handling, and debugging
 """
 import uuid
 import logging
@@ -53,7 +53,7 @@ class MarkdownToSanityConverter:
             self._walk_ast_and_print(child, depth + 1)
             child = child.nxt
     
-    def _extract_all_text_from_node(self) -> str:
+    def _extract_all_text_from_node(self, node) -> str:
         """Extract all text content from a node and its children."""
         if not node:
             return ""
@@ -256,21 +256,30 @@ class MarkdownToSanityConverter:
                 child = child.nxt
                 
         elif node_type == 'paragraph':
-            spans, mark_defs = self._parse_inline_content(node)
-            if spans:
-                block = self._create_block('normal', spans, mark_defs)
-                self.blocks.append(block)
-                self._debug_log(f"Added paragraph block with {len(spans)} spans")
+            # Check if this paragraph contains only an image
+            child = node.first_child
+            if (child and child.t == 'image' and 
+                not child.nxt and  # Only child
+                hasattr(child, 'destination')):
+                # This is an image paragraph, create an image block
+                self._create_image_block(child)
             else:
-                # Fallback: extract all text as plain text
-                text = self._extract_all_text_from_node(node)
-                if text.strip():
-                    fallback_span = self._create_simple_span(text.strip())
-                    if fallback_span:
-                        block = self._create_block('normal', [fallback_span])
-                        self.blocks.append(block)
-                        self._debug_log(f"Added fallback paragraph block")
-                        
+                # Regular paragraph
+                spans, mark_defs = self._parse_inline_content(node)
+                if spans:
+                    block = self._create_block('normal', spans, mark_defs)
+                    self.blocks.append(block)
+                    self._debug_log(f"Added paragraph block with {len(spans)} spans")
+                else:
+                    # Fallback: extract all text as plain text
+                    text = self._extract_all_text_from_node(node)
+                    if text.strip():
+                        fallback_span = self._create_simple_span(text.strip())
+                        if fallback_span:
+                            block = self._create_block('normal', [fallback_span])
+                            self.blocks.append(block)
+                            self._debug_log(f"Added fallback paragraph block")
+                            
         elif node_type == 'heading':
             level = getattr(node, 'level', 1)
             style = f"h{min(max(level, 1), 6)}"
@@ -363,6 +372,10 @@ class MarkdownToSanityConverter:
                 self.blocks.append(block)
                 self._debug_log(f"Added thematic break block")
                 
+        elif node_type == 'image':
+            # Handle standalone image nodes
+            self._create_image_block(node)
+                
         else:
             # For unknown block types, try to extract text
             text = self._extract_all_text_from_node(node)
@@ -372,6 +385,38 @@ class MarkdownToSanityConverter:
                     block = self._create_block('normal', [span])
                     self.blocks.append(block)
                     self._debug_log(f"Added unknown block type: {node_type}")
+    
+    def _create_image_block(self, image_node):
+        """Create a Sanity image block from a markdown image node."""
+        destination = getattr(image_node, 'destination', '')
+        title = getattr(image_node, 'title', '')
+        alt_text = ''
+        
+        # Extract alt text from the first child if it's text
+        if image_node.first_child and image_node.first_child.t == 'text':
+            alt_text = getattr(image_node.first_child, 'literal', '')
+        
+        if destination:
+            # Create image block
+            image_block = {
+                "_key": self._create_block_key(),
+                "_type": "image",
+                "asset": {
+                    "_type": "reference",
+                    "url": destination
+                }
+            }
+            
+            # Add alt text if available
+            if alt_text:
+                image_block["alt"] = alt_text
+                
+            # Add title if available
+            if title:
+                image_block["title"] = title
+                
+            self.blocks.append(image_block)
+            self._debug_log(f"Added image block: {destination}")
     
     def convert(self, markdown_text: str, debug: bool = False) -> List[Dict[str, Any]]:
         """Convert markdown text to Sanity blocks."""
@@ -450,14 +495,27 @@ if __name__ == "__main__":
     # Test markdown with all supported features
     test_markdown = """# Main Heading
 This is a **bold** paragraph with *italic* text and a ~~strikethrough~~ and <u>underline</u>.
+
 ## Subheading
 Here's a list:
 - Item 1 with `inline code`
 - Item 2 with more text
+
+![Alt text for image](https://example.com/test-image.jpg "Image title")
+
 > This is a blockquote with **bold** text.
+
 Final paragraph with some text.
+
+![Another image](/local/path/image.png)
+
 ```python
-a + b =c
-a=10
+a + b = c
+a = 10
 ```
 """
+    
+    print("Testing markdown conversion with images...")
+    blocks = markdown_to_sanity_blocks(test_markdown, debug=True)
+    print(f"\nGenerated {len(blocks)} blocks:")
+    print(json.dumps(blocks, indent=2))

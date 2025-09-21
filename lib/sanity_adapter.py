@@ -476,13 +476,6 @@ class SanityAdapter:
 
 
 
-# Inside your SanityAdapter class (sanity_adapter.py)
-
-# Make sure to import the parser function at the top of the file
-# from .markdown_parser import markdown_to_sanity_blocks # Adjust import path if needed
-# OR if it's in the same file:
-# from .sanity_adapter import markdown_to_sanity_blocks # Self-import if in same file (less ideal)
-
     def post_blog(self, title: str, summary: str, content: str, categories: List[str],
                   local_image_path: str, slug: str, alt_text: str, faqs: List[Dict[str, str]]) -> Dict[str, Any]:
         """
@@ -571,7 +564,123 @@ class SanityAdapter:
                     }
                 ]
 
-            # 4. Prepare FAQs
+            # 4. Process image blocks - upload images and replace URLs with asset references
+            processed_blocks = []
+            for block in content_blocks:
+                if block.get("_type") == "image":
+                    # Handle embedded images in content
+                    image_url = block.get("asset", {}).get("url")
+                    if image_url:
+                        try:
+                            # Download and upload the image to Sanity
+                            if image_url.startswith("http"):
+                                # Remote image - download first
+                                import tempfile
+                                import requests
+                                response = requests.get(image_url)
+                                response.raise_for_status()
+                                
+                                # Get file extension from URL or content type
+                                ext = os.path.splitext(image_url)[1] or ".jpg"
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                                    tmp.write(response.content)
+                                    temp_image_path = tmp.name
+                                
+                                # Upload to Sanity
+                                upload_result = self.upload_image(temp_image_path)
+                                os.unlink(temp_image_path)  # Clean up temp file
+                                
+                                if upload_result.get("success"):
+                                    # Replace the image block with a proper Sanity image reference
+                                    new_block = {
+                                        "_key": block.get("_key", str(uuid.uuid4())),
+                                        "_type": "image",
+                                        "asset": {
+                                            "_type": "reference",
+                                            "_ref": upload_result["asset_id"]
+                                        }
+                                    }
+                                    # Preserve alt text and title if they exist
+                                    if "alt" in block:
+                                        new_block["alt"] = block["alt"]
+                                    if "title" in block:
+                                        new_block["title"] = block["title"]
+                                    processed_blocks.append(new_block)
+                                else:
+                                    # If upload fails, keep the original block or create a placeholder
+                                    logger.warning(f"Failed to upload embedded image: {upload_result.get('error')}")
+                                    processed_blocks.append(block)
+                            else:
+                                # Local image - upload directly
+                                # Check if the file exists first
+                                if os.path.exists(image_url):
+                                    upload_result = self.upload_image(image_url)
+                                    if upload_result.get("success"):
+                                        # Replace the image block with a proper Sanity image reference
+                                        new_block = {
+                                            "_key": block.get("_key", str(uuid.uuid4())),
+                                            "_type": "image",
+                                            "asset": {
+                                                "_type": "reference",
+                                                "_ref": upload_result["asset_id"]
+                                            }
+                                        }
+                                        # Preserve alt text and title if they exist
+                                        if "alt" in block:
+                                            new_block["alt"] = block["alt"]
+                                        if "title" in block:
+                                            new_block["title"] = block["title"]
+                                        processed_blocks.append(new_block)
+                                    else:
+                                        # If upload fails, keep the original block or create a placeholder
+                                        logger.warning(f"Failed to upload embedded image: {upload_result.get('error')}")
+                                        processed_blocks.append(block)
+                                else:
+                                    logger.warning(f"Local image file does not exist: {image_url}")
+                                    # Create a text block as fallback
+                                    fallback_block = {
+                                        "_key": str(uuid.uuid4()),
+                                        "_type": "block",
+                                        "children": [
+                                            {
+                                                "_key": str(uuid.uuid4()),
+                                                "_type": "span",
+                                                "text": f"[Image: {image_url}]"
+                                            }
+                                        ],
+                                        "markDefs": [],
+                                        "style": "normal"
+                                    }
+                                    processed_blocks.append(fallback_block)
+                        except Exception as e:
+                            logger.error(f"Error processing embedded image: {e}")
+                            # Create a text block as fallback
+                            alt_text = block.get("alt", "Embedded image")
+                            fallback_block = {
+                                "_key": str(uuid.uuid4()),
+                                "_type": "block",
+                                "children": [
+                                    {
+                                        "_key": str(uuid.uuid4()),
+                                        "_type": "span",
+                                        "text": f"[{alt_text}]"
+                                    }
+                                ],
+                                "markDefs": [],
+                                "style": "normal"
+                            }
+                            processed_blocks.append(fallback_block)
+                    else:
+                        # No URL, keep the block as is
+                        processed_blocks.append(block)
+                else:
+                    # Not an image block, keep as is
+                    processed_blocks.append(block)
+
+            # Update content_blocks with processed blocks
+            content_blocks = processed_blocks
+
+            # 5. Prepare FAQs
             formatted_faqs = []
             if faqs: # Check if faqs list is provided and not empty
                 for faq_item in faqs:
@@ -591,12 +700,12 @@ class SanityAdapter:
                 logger.warning("No valid FAQs provided; setting empty array.")
                 formatted_faqs = []
 
-            # 5. Resolve Categories
+            # 6. Resolve Categories
             category_refs = self.resolve_categories_to_refs(categories)
             if not category_refs and categories:
                 logger.warning("Failed to resolve any category references.")
 
-            # 6. Construct Document Object
+            # 7. Construct Document Object
             full_url = f"https://blog-site-green-one.vercel.app/blog/{slug}"
 
             document = {
@@ -615,7 +724,7 @@ class SanityAdapter:
                 "faqs": formatted_faqs
             }
 
-            # 7. Create Document
+            # 8. Create Document
             create_result = self.create_document(document)
 
             # Inside SanityAdapter.post_blog, after create_result = self.create_document(...)
@@ -631,7 +740,7 @@ class SanityAdapter:
                     # Maybe return an error status here?
                     # return {"status": "error", "error": "Document ID could not be confirmed after creation."}
 
-            # 8. Handle Result
+            # 9. Handle Result
             if not create_result.get("success"):
                 return {
                     "status": "error",
