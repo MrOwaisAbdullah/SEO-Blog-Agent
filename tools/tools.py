@@ -334,70 +334,18 @@ def get_stock_image_tool(keyword: str):
         return {"error": "Failed to fetch stock image from Pexels"}
 
 @function_tool
-def generate_image_tool(keyword: str):
-    """Generates an image for a blog post using Hugging Face, StarryAI, or Freepik APIs."""
+def generate_image_tool(keyword: str, custom_prompt: str = None):
+    """Generates an image for a blog post using Freepik API (primary) and Hugging Face (fallback)."""
 
-    prompt = f"A professional, high-quality image for a blog post about {keyword} related to social media automation"
+    # Use custom prompt if provided, otherwise create a generic one
+    if custom_prompt:
+        prompt = custom_prompt
+    else:
+        prompt = f"A professional, high-quality image for a blog post about {keyword}"
 
-    # Try Hugging Face
+    # Try Freepik (primary) - Using the correct Flux Dev API
     try:
-        client = InferenceClient(
-            provider="hf-inference",
-            api_key=os.environ["HF_TOKEN"],
-            model="black-forest-labs/FLUX.1-dev"
-        )
-        image = client.text_to_image(prompt)
-        file_path = f"/tmp/{slugify(keyword)}_hf_image.png"
-        image.save(file_path)
-        return {"url": file_path, "alt_text": f"{keyword} illustration for social media automation", "source": "Hugging Face"}
-    except Exception as e:
-        print(f"Hugging Face failed: {str(e)}")
-
-    # Try StarryAI
-    try:
-        url = "https://api.starryai.com/creations/"
-        headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "X-API-Key": os.environ["STARRYAI_API_KEY"]
-        }
-        payload = {
-            "model": "abstractWorld",
-            "aspectRatio": "landscape",
-            "highResolution": False,
-            "images": 1,
-            "steps": 20,
-            "initialImageMode": "color",
-            "prompt": prompt,
-            "negativePrompt": "avoid realistic depictions"
-        }
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        creation = response.json()
-        creation_id = creation["id"]
-
-        # Poll for completion
-        poll_url = f"https://api.starryai.com/creations/{creation_id}"
-        for _ in range(10):  # Poll up to 10 times (adjust based on typical completion time)
-            time.sleep(10)  # Wait 10 seconds between polls
-            poll_response = requests.get(poll_url, headers=headers)
-            poll_response.raise_for_status()
-            creation = poll_response.json()
-            if creation["status"] == "completed" and creation["images"][0]["url"]:
-                image_url = creation["images"][0]["url"]
-                image_response = requests.get(image_url)
-                image_response.raise_for_status()
-                image = Image.open(io.BytesIO(image_response.content))
-                file_path = f"/tmp/{slugify(keyword)}_starryai_image.png"
-                image.save(file_path)
-                return {"url": file_path, "alt_text": f"{keyword} illustration for social media automation", "source": "StarryAI"}
-        return {"error": "StarryAI image generation timed out"}
-    except Exception as e:
-        print(f"StarryAI failed: {str(e)}")
-
-    # Try Freepik
-    try:
-        url = "https://api.freepik.com/v1/ai/mystic"
+        url = "https://api.freepik.com/v1/ai/text-to-image/flux-dev"
         headers = {
             "x-freepik-api-key": os.environ["FREEPIC_API_KEY"],
             "Content-Type": "application/json",
@@ -406,37 +354,79 @@ def generate_image_tool(keyword: str):
         payload = {
             "prompt": prompt,
             "aspect_ratio": "widescreen_16_9",
-            "resolution": "2k",
-            "model": "realism",
-            "filter_nsfw": True,
             "styling": {
-                "styles": [{"name": "professional", "strength": 100}],
-                "colors": [{"color": "#4A90E2", "weight": 0.5}]  # Blue tone for brand consistency
+                "effects": {
+                    "framing": "horizontal"
+                }
             }
         }
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        task = response.json()
-        task_id = task["task_id"]
+        task_response = response.json()
+        
+        # Check if we got an immediate result or need to poll
+        if "data" in task_response and "generated" in task_response["data"]:
+            # Immediate result
+            image_url = task_response["data"]["generated"][0]
+            image_response = requests.get(image_url)
+            image_response.raise_for_status()
+            image = Image.open(BytesIO(image_response.content))
+            # Use a cross-platform temporary directory
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                image.save(tmp.name)
+                file_path = tmp.name
+            return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Freepik"}
+        elif "data" in task_response and "task_id" in task_response["data"]:
+            # Need to poll for result
+            task_id = task_response["data"]["task_id"]
 
-        # Poll for completion (Freepik may require polling, as per async nature)
-        poll_url = f"https://api.freepik.com/v1/ai/mystic/{task_id}"  # Adjust if Freepik provides a specific polling endpoint
-        for _ in range(10):  # Poll up to 10 times
-            time.sleep(10)
-            poll_response = requests.get(poll_url, headers=headers)
-            poll_response.raise_for_status()
-            task = poll_response.json()
-            if task["task_status"] == "COMPLETED" and task["generated"]:
-                image_url = task["generated"][0]["url"]  # Adjust based on actual response structure
-                image_response = requests.get(image_url)
-                image_response.raise_for_status()
-                image = Image.open(io.BytesIO(image_response.content))
-                file_path = f"/tmp/{slugify(keyword)}_freepik_image.png"
-                image.save(file_path)
-                return {"url": file_path, "alt_text": f"{keyword} illustration for social media automation", "source": "Freepik"}
-        return {"error": "Freepik image generation timed out"}
+            # Poll for completion
+            poll_url = f"https://api.freepik.com/v1/ai/text-to-image/flux-dev/{task_id}"
+            for _ in range(15):  # Poll up to 15 times
+                time.sleep(15)  # Wait 15 seconds between polls
+                poll_response = requests.get(poll_url, headers=headers)
+                poll_response.raise_for_status()
+                task_status = poll_response.json()
+                
+                if "data" in task_status and "status" in task_status["data"]:
+                    status = task_status["data"]["status"]
+                    if status == "COMPLETED" and "generated" in task_status["data"]:
+                        image_url = task_status["data"]["generated"][0]
+                        image_response = requests.get(image_url)
+                        image_response.raise_for_status()
+                        image = Image.open(BytesIO(image_response.content))
+                        # Use a cross-platform temporary directory
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                            image.save(tmp.name)
+                            file_path = tmp.name
+                        return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Freepik"}
+                    elif status == "FAILED":
+                        return {"error": "Freepik image generation failed"}
+                
+        return {"error": "Freepik image generation timed out or invalid response"}
     except Exception as e:
-        return {"error": f"Freepik failed: {str(e)}"}
+        print(f"Freepik failed: {str(e)}")
+
+    # Try Hugging Face (fallback)
+    try:
+        client = InferenceClient(
+            provider="hf-inference",
+            api_key=os.environ["HF_TOKEN"],
+            model="black-forest-labs/FLUX.1-dev"
+        )
+        image = client.text_to_image(prompt)
+        # Use a cross-platform temporary directory
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            image.save(tmp.name)
+            file_path = tmp.name
+        return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Hugging Face"}
+    except Exception as e:
+        print(f"Hugging Face failed: {str(e)}")
+
+    return {"error": "All image generation services failed"}
 
 @function_tool
 async def post_to_sanity_tool(

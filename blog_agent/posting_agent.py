@@ -2,8 +2,9 @@
 
 import logging
 from agents import Agent, ModelSettings, AgentHooks, handoff
-from tools.tools import post_to_sanity_tool, get_stock_image_tool, fetch_internal_links_tool # Ensure correct import paths
+from tools.tools import post_to_sanity_tool, fetch_internal_links_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
+from blog_agent.image_agent import get_blog_image_tool  # Import the new image agent tool
 from typing import Dict, Any, List, Optional
 import json
 import asyncio
@@ -83,7 +84,8 @@ preparation_agent = Agent(
       - External links: Use any in `Generated Content` or leave `EXTERNAL_LINKS_MD` empty.
 
     4. **Fetch Image**
-      - Use `get_stock_image_tool` with `Keyword/Topic` to get `IMAGE_URL` and `ALT_TEXT`.
+      - Use `get_blog_image_tool` with `TITLE` and `Generated Content` to get a high-quality, relevant image.
+      - This tool will generate an AI image first, evaluate its quality, and use stock photos as fallback.
 
     5. **Derive Fields**
       - `TITLE`: Use `Keyword/Topic` or derive a title.
@@ -134,7 +136,7 @@ preparation_agent = Agent(
     - `fetch_internal_links_tool`
     - `get_stock_image_tool`
     """,
-    tools=[manage_sheet_data_tool, fetch_internal_links_tool, get_stock_image_tool],
+    tools=[manage_sheet_data_tool, fetch_internal_links_tool, get_blog_image_tool],
     hooks=MyAgentHooks(),
     model="gemini-2.0-flash",
     model_settings=ModelSettings(temperature=0.5),

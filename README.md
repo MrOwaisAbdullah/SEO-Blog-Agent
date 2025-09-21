@@ -107,8 +107,8 @@ DEFAULT_MODEL=gemini-2.5-flash
 
 #### Image API Keys
 - `PEXELS_API_KEY` - Pexels API key for stock images
-- `STARRYAI_API_KEY` - StarryAI API key for image generation
-- `HF_TOKEN` - Hugging Face token for AI models
+- `FREEPIC_API_KEY` - Freepik API key for image generation (primary)
+- `HF_TOKEN` - Hugging Face token for AI models (fallback)
 
 #### Security
 - `API_KEY` - Custom API key for authenticating requests to the agent API
