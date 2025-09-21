@@ -14,7 +14,10 @@ import requests
 from io import BytesIO
 from PIL import Image
 import base64
-from blog_agent.custom_runner import get_model_by_name
+from blog_agent.custom_runner import FallbackAgentRunner
+
+# Create a custom runner instance to access the get_model_by_name method
+custom_runner = FallbackAgentRunner()
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +95,7 @@ image_quality_evaluation_agent = Agent(
     }
     ```
     """,
-    model=get_model_by_name("grok-4-fast-openrouter"),  # Using the specified model for advanced image analysis
+    model=custom_runner.get_model_by_name("grok-4-fast-openrouter"),  # Using the specified model for advanced image analysis
     model_settings=ModelSettings(temperature=0.3),  # Lower temperature for more consistent evaluations
 )
 
@@ -200,7 +203,7 @@ image_selection_agent = Agent(
         get_stock_image_tool,
         image_quality_evaluation_agent.as_tool(tool_name="image_quality_evaluation_agent", tool_description="Evaluates image quality and relevance for blog posts")
     ],
-    model=get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
     model_settings=ModelSettings(temperature=0.7),
 )
 

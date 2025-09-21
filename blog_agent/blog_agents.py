@@ -1,5 +1,5 @@
 from agents import Agent, ModelSettings, AgentHooks,RunContextWrapper, handoff, Tool
-from blog_agent.custom_runner import get_model_by_name
+from blog_agent.custom_runner import FallbackAgentRunner
 from tools.tools import get_stock_image_tool, post_to_sanity_tool, get_author_context_tool, textstat_tool, grammar_check_tool, fetch_internal_links_tool
 from lib.models import *
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
@@ -31,6 +31,9 @@ class MyAgentHooks(AgentHooks):
         print(f"[Hook] Tool start: {tool.name} in agent '{agent.name}'")
         print("--------------------------------")
 
+
+# Create a FallbackAgentRunner instance to access the get_model_by_name method
+custom_runner = FallbackAgentRunner()
 
 content_evaluation_agent = Agent(
     name="Content Evaluation Agent",
@@ -156,7 +159,7 @@ Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](htt
     ```
     """,
     tools=[manage_sheet_data_tool, web_search_tool, textstat_tool, grammar_check_tool],
-    model=get_model_by_name("gemini-2.0-flash"),
+    model=custom_runner.get_model_by_name("gemini-2.0-flash"),
     hooks=MyAgentHooks(),
     model_settings=ModelSettings(temperature=0.4),
 )
@@ -376,7 +379,7 @@ Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](htt
     tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements"), fetch_internal_links_tool],
     handoff_description="Use the given brief to create a high quality seo friendly Blog content, and use evaluation tools for feedback and improve the content using it.",
     hooks=MyAgentHooks(),
-    model=get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
     model_settings=ModelSettings(temperature=0.7),
 )
 
@@ -491,7 +494,7 @@ brief_agent = Agent(
         "action": "append_row",
         "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...
 ## Introduction...
-[Link to AI Tips in Nespresso section]", "[{"question": "How do you choose a coffee maker?", "answer": "Look for compact models..."}]", "Coffee Review: https://coffeereview.com,Top 10: https://example.com", "Transcript discusses Nespresso...", "Approve", "No"]
+[Link to AI Tips in Nespresso section]", "[{"question": "How do you choose a coffee maker?", "answer": "Look for compact models..."}]", "Coffee Review: https://coffeereview.com,Top 10: https://example.com", "Transcript discusses Nespresso...", "No"]
         }
         ```  
     - Retry up to 3 times with 5-second delays; if it fails, include:  
@@ -541,13 +544,13 @@ brief_agent = Agent(
     "status": "success",
     "Keyword/Topic": "best coffee maker 2025",
     "Brief Content": "# Best Coffee Makers 2025 Brew Your Perfect Cup
-## Introduction
-Struggling to find a coffee maker that fits your morning rush?
-## Nespresso Features
-What makes Nespresso stand out?
-## Budget Options
-How do budget coffee makers compare?
-"
+    ## Introduction
+    Struggling to find a coffee maker that fits your morning rush?
+    ## Nespresso Features
+    What makes Nespresso stand out?
+    ## Budget Options
+    How do budget coffee makers compare?
+    "
     }
     "FAQs": "[{"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models like Nespresso. [50–100 words]"}, {"question": "Can a coffee maker save time?", "answer": "Yes, models with auto-brew save time. [50–100 words]"}]",
     "External Source Links": "Coffee Review: https://coffeereview.com,Top 10 Coffee Makers: https://example.com",
@@ -558,8 +561,8 @@ How do budget coffee makers compare?
     }
     ```
     """,
-    tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool],
+    tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool, get_author_context_tool],
     hooks=MyAgentHooks(),
-    model=get_model_by_name("grok-4-fast-openrouter"),
+    model=custom_runner.get_model_by_name("grok-4-fast-openrouter"),
     model_settings=ModelSettings(temperature=0.8),
 )

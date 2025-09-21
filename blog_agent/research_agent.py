@@ -225,8 +225,8 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
             "A brief summary of the content",
             "https://example.com, https://example2.com",  // Convert list to comma-separated string
             "Example Title, Another Title",  // Convert list to comma-separated string
-            "Approve",
-            "no"
+            "Approved",
+            "No"
           ]
         }
         ```
@@ -238,9 +238,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         model_settings=ModelSettings(temperature=0.5),
     )
 
-# Step 1: Run Triage Agent to get the input
-    # Use the custom runner instance we already created
-    
+# Step 1: Run Triage Agent to get the input    
     triage_result = await custom_runner.run_with_fallback(
         triage_agent,
         "Check the Keyword sheet and return the next keyword or topic",
@@ -279,19 +277,3 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     )
 
     return output_result
-
-# Example usage (if run directly with an async event loop)
-if __name__ == "__main__":
-    import asyncio
-    # For direct execution, we need to create a proper runner instance
-    from blog_agent.custom_runner import FallbackAgentRunner
-    custom_runner = FallbackAgentRunner()
-    
-    result = asyncio.run(combined_research_workflow(
-        LLM_MODELS=custom_runner.LLM_MODELS, 
-        is_model_available=custom_runner.is_model_available, 
-        get_model_by_name=custom_runner.get_model_by_name, 
-        increment_usage=custom_runner.increment_usage, 
-        MAX_TURNS=10
-    ))
-    print(result)
