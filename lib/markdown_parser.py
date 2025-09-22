@@ -397,12 +397,11 @@ class MarkdownToSanityConverter:
             alt_text = getattr(image_node.first_child, 'literal', '')
         
         if destination:
-            # Create image block
+            # Create image block with URL directly (Sanity adapter will process this)
             image_block = {
                 "_key": self._create_block_key(),
                 "_type": "image",
                 "asset": {
-                    "_type": "reference",
                     "url": destination
                 }
             }

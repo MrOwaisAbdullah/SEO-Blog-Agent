@@ -55,9 +55,9 @@ class SanityAdapter:
 
         # Build query for exact or partial match on category titles
         query_conditions = ' || '.join([f'categories[]->title match "*{word}*"' for word in topic_words])
-        query = f'*[_type == "post" && ({query_conditions})][0...{max_results}]{{title, "slug": slug.current}}'
+        query = f'*[_type == "post" && ({query_conditions})][0...{max_results}]{{title, "slug": slug.current, summary}}'
         if exclude_slug:
-            query = f'*[_type == "post" && ({query_conditions}) && slug.current != "{exclude_slug}"][0...{max_results}]{{title, "slug": slug.current}}'
+            query = f'*[_type == "post" && ({query_conditions}) && slug.current != "{exclude_slug}"][0...{max_results}]{{title, "slug": slug.current, summary}}'
 
         encoded_query = urllib.parse.quote(query, safe='')
         endpoint = f"/data/query/{self.dataset}?query={encoded_query}"
@@ -81,9 +81,9 @@ class SanityAdapter:
         # Fallback: broader query using first keyword
         if not results:
             logger.info(f"No matches for keywords {topic_words}. Trying broader query.")
-            broad_query = f'*[_type == "post" && categories[]->title match "*{topic_words[0]}*"][0...{max_results}]{{title, "slug": slug.current}}'
+            broad_query = f'*[_type == "post" && categories[]->title match "*{topic_words[0]}*"][0...{max_results}]{{title, "slug": slug.current, summary}}'
             if exclude_slug:
-                broad_query = f'*[_type == "post" && categories[]->title match "*{topic_words[0]}*" && slug.current != "{exclude_slug}"][0...{max_results}]{{title, "slug": slug.current}}'
+                broad_query = f'*[_type == "post" && categories[]->title match "*{topic_words[0]}*" && slug.current != "{exclude_slug}"][0...{max_results}]{{title, "slug": slug.current, summary}}'
             encoded_broad_query = urllib.parse.quote(broad_query, safe='')
             broad_endpoint = f"/data/query/{self.dataset}?query={encoded_broad_query}"
             attempt = 0
@@ -108,8 +108,9 @@ class SanityAdapter:
         for post in results[:max_results]:
             title = post.get("title", "").lower()
             slug = post.get("slug", "").lower()
+            summary = post.get("summary", "")
             if any(word in title or word in slug for word in topic_words):
-                validated_links.append({"title": post["title"], "slug": f"/blog/{post['slug']}"})
+                validated_links.append({"title": post["title"], "slug": f"/blog/{post['slug']}", "summary": summary})
             else:
                 logger.warning(f"Excluding irrelevant post: title='{post['title']}', slug='{post['slug']}'")
         
@@ -571,6 +572,7 @@ class SanityAdapter:
                     # Handle embedded images in content
                     image_url = block.get("asset", {}).get("url")
                     if image_url:
+                        logger.info(f"[SanityAdapter.post_blog] Processing embedded image: {image_url}")
                         try:
                             # Download and upload the image to Sanity
                             if image_url.startswith("http"):
@@ -586,11 +588,14 @@ class SanityAdapter:
                                     tmp.write(response.content)
                                     temp_image_path = tmp.name
                                 
+                                logger.info(f"[SanityAdapter.post_blog] Downloaded image to: {temp_image_path}")
+                                
                                 # Upload to Sanity
                                 upload_result = self.upload_image(temp_image_path)
                                 os.unlink(temp_image_path)  # Clean up temp file
                                 
                                 if upload_result.get("success"):
+                                    logger.info(f"[SanityAdapter.post_blog] Successfully uploaded image: {upload_result}")
                                     # Replace the image block with a proper Sanity image reference
                                     new_block = {
                                         "_key": block.get("_key", str(uuid.uuid4())),
@@ -608,8 +613,23 @@ class SanityAdapter:
                                     processed_blocks.append(new_block)
                                 else:
                                     # If upload fails, keep the original block or create a placeholder
-                                    logger.warning(f"Failed to upload embedded image: {upload_result.get('error')}")
-                                    processed_blocks.append(block)
+                                    logger.warning(f"[SanityAdapter.post_blog] Failed to upload embedded image: {upload_result.get('error')}")
+                                    # Create a text block as fallback with more descriptive error
+                                    alt_text = block.get("alt", "Embedded image")
+                                    fallback_block = {
+                                        "_key": str(uuid.uuid4()),
+                                        "_type": "block",
+                                        "children": [
+                                            {
+                                                "_key": str(uuid.uuid4()),
+                                                "_type": "span",
+                                                "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]"
+                                            }
+                                        ],
+                                        "markDefs": [],
+                                        "style": "normal"
+                                    }
+                                    processed_blocks.append(fallback_block)
                             else:
                                 # Local image - upload directly
                                 # Check if the file exists first
@@ -634,10 +654,26 @@ class SanityAdapter:
                                     else:
                                         # If upload fails, keep the original block or create a placeholder
                                         logger.warning(f"Failed to upload embedded image: {upload_result.get('error')}")
-                                        processed_blocks.append(block)
+                                        # Create a text block as fallback
+                                        alt_text = block.get("alt", "Embedded image")
+                                        fallback_block = {
+                                            "_key": str(uuid.uuid4()),
+                                            "_type": "block",
+                                            "children": [
+                                                {
+                                                    "_key": str(uuid.uuid4()),
+                                                    "_type": "span",
+                                                    "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]"
+                                                }
+                                            ],
+                                            "markDefs": [],
+                                            "style": "normal"
+                                        }
+                                        processed_blocks.append(fallback_block)
                                 else:
                                     logger.warning(f"Local image file does not exist: {image_url}")
                                     # Create a text block as fallback
+                                    alt_text = block.get("alt", "Embedded image")
                                     fallback_block = {
                                         "_key": str(uuid.uuid4()),
                                         "_type": "block",
@@ -645,7 +681,7 @@ class SanityAdapter:
                                             {
                                                 "_key": str(uuid.uuid4()),
                                                 "_type": "span",
-                                                "text": f"[Image: {image_url}]"
+                                                "text": f"[Image: {alt_text} - File not found: {image_url}]"
                                             }
                                         ],
                                         "markDefs": [],
@@ -653,7 +689,7 @@ class SanityAdapter:
                                     }
                                     processed_blocks.append(fallback_block)
                         except Exception as e:
-                            logger.error(f"Error processing embedded image: {e}")
+                            logger.error(f"Error processing embedded image: {e}", exc_info=True)
                             # Create a text block as fallback
                             alt_text = block.get("alt", "Embedded image")
                             fallback_block = {
@@ -663,7 +699,7 @@ class SanityAdapter:
                                     {
                                         "_key": str(uuid.uuid4()),
                                         "_type": "span",
-                                        "text": f"[{alt_text}]"
+                                        "text": f"[Image: {alt_text} - Processing error: {str(e)}]"
                                     }
                                 ],
                                 "markDefs": [],

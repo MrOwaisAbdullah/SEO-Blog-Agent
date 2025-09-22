@@ -30,6 +30,9 @@ async def verify_api_key(api_key: str = Depends(api_key_header)):
     Verifies the API key provided in the Authorization header.
     Expected format: "Bearer <your_api_key>"
     """
+    # For local development, check against the known API key
+    EXPECTED_API_KEY = "abc123"
+        
     if not api_key:
         raise HTTPException(status_code=401, detail="Authorization header is missing")
     if not api_key.startswith("Bearer "):

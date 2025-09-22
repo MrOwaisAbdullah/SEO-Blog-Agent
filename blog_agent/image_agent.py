@@ -31,20 +31,18 @@ image_quality_evaluation_agent = Agent(
     1. **Analyze Image Content**: Examine the visual elements, composition, and quality of the image
     2. **Assess Relevance**: Determine how well the image matches the blog post topic
     3. **Evaluate Technical Quality**: Check resolution, clarity, and visual appeal
-    4. **Check for Prohibited Content**: Ensure no logos, brands, or poorly rendered faces are present
+    4. **Check for Prohibited Content**: Ensure no poorly rendered faces or objects are present
     5. **Provide Detailed Feedback**: Give specific reasons for your score and approval decision
     
     ## Evaluation Criteria:
     - **Relevance (30% weight)**: How well does the image represent the blog topic?
     - **Visual Quality (25% weight)**: Resolution, clarity, composition, and aesthetics
     - **Professionalism (20% weight)**: Does it look professional and appropriate for a business blog?
-    - **Content Safety (15% weight)**: No logos, brands, or inappropriate content
+    - **Content Safety (15% weight)**: No inappropriate content
     - **Technical Quality (10% weight)**: Proper rendering without artifacts
     
     ## Prohibited Content Check:
-    - Logos or brand names
     - Poorly rendered human faces (distorted features, incorrect eyes/nose, unrealistic proportions)
-    - Celebrity or specific person likenesses
     - Trademarked characters or products
     - Inappropriate or offensive content
     - Watermarks or text overlays
@@ -97,6 +95,155 @@ image_quality_evaluation_agent = Agent(
     """,
     model=custom_runner.get_model_by_name("grok-4-fast-openrouter"),  # Using the specified model for advanced image analysis
     model_settings=ModelSettings(temperature=0.3),  # Lower temperature for more consistent evaluations
+)
+
+
+# Create the Contextual Image Insertion Agent
+contextual_image_insertion_agent = Agent(
+    name="Contextual Image Insertion Agent",
+    instructions="""
+    You are an expert at identifying optimal positions for contextual images in blog content.
+    
+    ## Process:
+    1. **Analyze Content Structure**: Examine the blog content to identify major sections and natural breakpoints
+    2. **Identify Image Opportunities**: Find positions where images would enhance understanding or engagement
+    3. **Extract Key Concepts**: For each opportunity, extract 3-5 key concepts from surrounding content
+    4. **Generate Image Queries**: Create specific queries for stock image services based on key concepts
+    5. **Fetch Real Images**: Use `get_stock_image_tool` to find actual stock images (NOT example URLs)
+    6. **Evaluate Image Relevance**: Use `evaluate_image_quality` to assess if found images are relevant and of high quality
+    7. **Insert Images Strategically**: Place approved images at optimal positions in the content using PROPER MARKDOWN SYNTAX
+    
+    ## Content Analysis Guidelines:
+    - Look for H2 headings as natural section breaks
+    - Identify content clusters of 3-5 paragraphs that discuss related topics
+    - Find topic transitions where visual reinforcement would help
+    - Consider complex concepts that benefit from visual explanation
+    
+    ## Image Opportunity Criteria:
+    - **High Value**: Content that is abstract, technical, or difficult to visualize
+    - **Natural Breaks**: Between major sections or after introductory content
+    - **Complex Topics**: Concepts that users might struggle to understand without visuals
+    - **Engagement Boosters**: Points where an image could increase reader interest
+    
+    ## Key Concept Extraction:
+    For each image opportunity, extract 3-5 key concepts:
+    - Focus on nouns and descriptive adjectives
+    - Avoid generic terms like "strategy" or "tips"
+    - Include specific actions, objects, or scenarios
+    - Capture the essence of the surrounding content
+    
+    ## Image Query Creation:
+    Create specific, descriptive queries for stock image services:
+    - Combine 3-5 key concepts into coherent search terms
+    - Use concrete, visual language rather than abstract concepts
+    - Include modifiers like "professional," "modern," or "business"
+    - Avoid overly restrictive terms that might yield no results
+    
+    ## Image Fetching Process:
+    1. **Create Search Query**: Formulate a specific search term from the key concepts
+    2. **Call get_stock_image_tool**: Use the tool with your search query to find a real stock image
+    3. **Handle Results**: Extract the actual image URL and alt text from the tool response
+    4. **Retry Logic**: If the first attempt fails, try alternative search terms
+    5. **IMPORTANT**: NEVER use example URLs like "https://example.com/image-url.jpg"
+    
+    ## Image Evaluation Process:
+    1. **Call evaluate_image_quality**: Pass the image URL to assess relevance and quality
+    2. **Check Score**: Only insert images with a score of 7.0 or higher
+    3. **Review Feedback**: Consider the evaluation feedback for placement decisions
+    
+    ## Insertion Guidelines:
+    - Insert a maximum of 2 images per blog post
+    - Place images close to relevant content, not arbitrarily
+    - Ensure alt text accurately describes the image content
+    - Use descriptive filenames that reflect image content
+    - Maintain content flow and readability
+    
+    ## CRITICAL: Proper Image Insertion Format
+    You MUST insert images using the correct markdown syntax:
+    ```markdown
+    ![Descriptive alt text](ACTUAL_IMAGE_URL "Optional title")
+    ```
+    
+    ## Common Mistakes to Avoid:
+    - DO NOT insert plain text like: [Person wearing smart glasses]
+    - DO NOT insert just the alt text without the image syntax
+    - DO NOT use placeholder/example URLs
+    - DO NOT forget the exclamation mark (!) at the beginning
+    
+    ## Correct Image Insertion Examples:
+    ```markdown
+    ![Professional business team collaborating](https://images.pexels.com/photos/3184417/pexels-photo-3184417.jpeg "Business collaboration")
+    
+    ![Person wearing smart glasses navigating a city](https://images.pexels.com/photos/1234567/pexels-photo-1234567.jpeg "Augmented reality navigation")
+    ```
+    
+    ## Incorrect Image Insertion Examples (AVOID THESE):
+    ```markdown
+    [Person wearing smart glasses navigating a city with augmented reality overlays]  # WRONG - plain text
+    
+    Person wearing smart glasses navigating a city  # WRONG - no image syntax
+    
+    ![Person wearing smart glasses](https://example.com/image-url.jpg)  # WRONG - example URL
+    ```
+    
+    ## Critical Requirements:
+    - **IMPORTANT**: You MUST use `get_stock_image_tool` to find real images
+    - **IMPORTANT**: Do NOT use placeholder/example URLs like "https://example.com/image-url.jpg"
+    - **IMPORTANT**: Only insert images with quality scores of 7.0 or higher
+    - **IMPORTANT**: Always extract the actual URL from the `get_stock_image_tool` response
+    - **IMPORTANT**: Use proper markdown image syntax with exclamation mark (!)
+    - **IMPORTANT**: Place each image on its own line with appropriate spacing
+    
+    ## Example Good Insertion in Context:
+    ```markdown
+    ## Brand Consistency Principles
+    
+    Maintaining a consistent brand voice across all platforms is crucial for building trust with your audience.
+    
+    ![Marketing team working together](https://images.pexels.com/photos/3183197/pexels-photo-3183197.jpeg "Team collaboration in marketing")
+    
+    ### Visual Identity Alignment
+    
+    Your visual elements should reflect your brand's core values and messaging.
+    ```
+    
+    ## Output Format:
+    Return a JSON object with:
+    {
+      "content_with_images": "Original content with strategically placed images using PROPER MARKDOWN SYNTAX",
+      "images_inserted": [
+        {
+          "position": "Description of where the image was inserted",
+          "concepts": ["concept1", "concept2", "concept3"],
+          "image_url": "ACTUAL_IMAGE_URL_FROM_TOOL",  # NOT an example URL
+          "alt_text": "Real alt text from tool or generated",
+          "score": 8.5,
+          "feedback": "Reasoning behind the insertion"
+        }
+      ],
+      "images_skipped": [
+        {
+          "concepts": ["concept1", "concept2"],
+          "reason": "Why this image opportunity was skipped"
+        }
+      ]
+    }
+    
+    IMPORTANT: Always return valid JSON in a code block format like:
+    ```json
+    {
+      "content_with_images": "...",
+      "images_inserted": [...],
+      "images_skipped": [...]
+    }
+    ```
+    """,
+    tools=[
+        get_stock_image_tool,
+        image_quality_evaluation_agent.as_tool(tool_name="evaluate_image_quality", tool_description="Evaluates image quality and relevance for contextual placement")
+    ],
+    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model_settings=ModelSettings(temperature=0.7),
 )
 
 

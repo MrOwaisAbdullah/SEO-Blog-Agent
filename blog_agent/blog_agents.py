@@ -250,7 +250,7 @@ content_generator_agent = Agent(
         - FAQs (JSON string) - **IMPORTANT**: This should be a separate JSON string containing the FAQs, not combined with the content
         - Quality Score (integer in JSON response, but must be converted to string when calling `manage_sheet_data_tool`)  
         - Status ("Generated")  
-        - Approve/Disapprove ("")  
+        - Approve/Disapprove ("Approved")  
         - Published ("No")  
     - **IMPORTANT**: The generated_posts worksheet has the following columns in order: Keyword/Topic, Generated Content, FAQs, Quality Score, Status, Approve/Disapprove, Published
     - Example tool call:  

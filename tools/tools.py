@@ -433,6 +433,80 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
     return {"error": "All image generation services failed"}
 
 @function_tool
+async def insert_contextual_images_tool(
+    content: str,
+    title: str,
+    max_images: int = 2
+) -> Dict[str, Any]:
+    """
+    Inserts contextual images into blog content at strategic positions.
+    
+    Args:
+        content (str): The blog post content in Markdown format
+        title (str): The blog post title
+        max_images (int): Maximum number of images to insert (default: 2)
+        
+    Returns:
+        Dict[str, Any]: Result containing content with inserted images and metadata
+    """
+    try:
+        # Import the custom runner and contextual image agent
+        from blog_agent.custom_runner import FallbackAgentRunner
+        from blog_agent.image_agent import contextual_image_insertion_agent
+        
+        custom_runner = FallbackAgentRunner()
+        
+        # Run the contextual image insertion agent
+        result = await custom_runner.run_with_fallback(
+            contextual_image_insertion_agent,
+            f"Insert contextual images into the following blog post:\n\nTitle: {title}\n\nContent:\n{content}\n\nMaximum images to insert: {max_images}",
+            max_turns=30
+        )
+        
+        # Extract the final output
+        final_output = result.final_output if hasattr(result, 'final_output') else str(result)
+        
+        # Try to parse as JSON if it's a string
+        if isinstance(final_output, str):
+            try:
+                # Extract JSON from code block if present
+                import re
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', final_output, re.DOTALL)
+                if json_match:
+                    final_output = json.loads(json_match.group(1))
+                else:
+                    # Try to parse as JSON directly
+                    final_output = json.loads(final_output)
+            except json.JSONDecodeError:
+                # If parsing fails, return the raw output
+                pass
+        
+        # If we have a dict result, return it
+        if isinstance(final_output, dict):
+            return final_output
+        else:
+            # Return a generic success response
+            return {
+                "status": "success",
+                "content_with_images": content,
+                "images_inserted": [],
+                "images_skipped": [],
+                "message": "No contextual images were inserted"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error in insert_contextual_images_tool: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": f"Failed to insert contextual images: {str(e)}",
+            "content_with_images": content,
+            "images_inserted": [],
+            "images_skipped": []
+        }
+    
+
+
+@function_tool
 async def post_to_sanity_tool(
     title: str,
     summary: str,
