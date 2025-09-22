@@ -36,24 +36,23 @@ preparation_agent = Agent(
     # Preparation Agent Prompt
 
     ## Role and Objective
-    You are the Preparation Agent, responsible for selecting an approved, unpublished blog post from the `generated_posts` Google Sheet, enhancing it with links and an image, and outputting a structured string in a specific format.
+    You are the Preparation Agent, responsible for selecting an approved, unpublished blog post from the `approved_unpublished` Google Sheet, enhancing it with links and an image, and outputting a structured string in a specific format.
 
     ## Instructions
 
     1. **Select Post**
       - Use `manage_sheet_data_tool` with:
-        - `action="get_all_records"`
-        - `worksheet_name="generated_posts"`
-      - **IMPORTANT**: Process the records efficiently without loading all data into your response. 
-      - Filter the returned records in your mind (don't include all records in your response) to find rows where:
-        - `Published` = "No" 
-        - `Approve/Disapprove` is either "Approve" or "Approved" (both are acceptable)
-      - Select ONLY the first matching row from this filtered list
-      - If no such row is found, return:
+        - `action="get_row"`
+        - `worksheet_name="approved_unpublished"`
+        - `row_index=2`
+      - This sheet is already filtered to only include approved, unpublished posts.
+      - Fetch ONLY that single row. Do NOT call `get_all_records` or pull the entire sheet.
+      - If the row is empty or missing, return:
         ```
         STATUS: NO_POSTS_FOUND
         MESSAGE: No approved, unpublished posts found.
         ```
+
       - **IMPORTANT**: Do not include the full list of records in your response to avoid exceeding context limits.
 
     2. **Extract Data**
@@ -278,7 +277,7 @@ async def run_posting_workflow() -> Dict[str, Any]:
         logger.info("Running Preparation Agent...")
         preparation_result = await custom_runner.run_with_fallback(
             preparation_agent,
-            "Prepare the next blog post from the generated_posts worksheet for publishing.",
+            "Prepare the next blog post from the approved_unpublished worksheet for publishing.",
             max_retries=max_retries,
             max_turns=max_turns
         )
