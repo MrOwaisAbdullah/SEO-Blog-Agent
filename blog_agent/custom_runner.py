@@ -1,11 +1,31 @@
-from agents import RunResult, RunHooks
-from agents.models.interface import Model
-from agents.exceptions import ModelBehaviorError, MaxTurnsExceeded
+try:
+    from agents import RunResult, RunHooks
+    from agents.models.interface import Model
+    from agents.exceptions import ModelBehaviorError, MaxTurnsExceeded
+    from agents.run import AgentRunner
+except ImportError:
+    # Create dummy classes to allow the application to run
+    # This is a workaround for the missing 'agents' module
+    class RunResult:
+        pass
+    class RunHooks:
+        pass
+    class Model:
+        pass
+    class ModelBehaviorError(Exception):
+        pass
+    class MaxTurnsExceeded(Exception):
+        pass
+    class AgentRunner:
+        async def run(self, *args, **kwargs):
+            print("Warning: 'agents' module not found. Using dummy AgentRunner.")
+            raise NotImplementedError("AgentRunner is not implemented")
+
 from typing import Any, Dict, List, Optional, Union
+import hashlib
 import asyncio
 import os
 from datetime import datetime, timedelta
-from agents.run import AgentRunner
 
 # Custom runner that extends AgentRunner and adds fallback logic
 class FallbackAgentRunner(AgentRunner):
@@ -201,12 +221,24 @@ class FallbackAgentRunner(AgentRunner):
         session = None
         last_error = None
 
-        # Add a maximum iteration limit to prevent infinite loops
-        max_iterations = 10  # Prevent infinite handoff loops
+        # Track agents we've executed in this run to avoid duplicate handoffs
+        # Use object id() for robustness in case multiple agents share the same name
+        seen_agent_ids = set()
+        # Track how many times an agent (by id) was invoked in this run
+        agent_invocation_counts: Dict[int, int] = {}
+        # Track processed handoffs by (agent_name, input_hash) to avoid duplicate processing
+        processed_handoffs = set()
+
+        # Add a maximum iteration limit to prevent infinite handoff loops
+        max_iterations = 10
         iteration_count = 0
 
         while iteration_count < max_iterations:
             iteration_count += 1
+            # Flag to indicate a handoff occurred during this iteration so we can
+            # restart the outer loop and continue with the new agent/input while
+            # preserving tracking state (seen_agent_ids, processed_handoffs, etc.).
+            handoff_occurred = False
             print(f"[DEBUG] Entering fallback loop for agent: {getattr(current_agent, 'name', str(current_agent))}")
             print(f"[DEBUG] Current input: {current_input}")
             print(f"[DEBUG] Current session: {session}")
@@ -229,14 +261,16 @@ class FallbackAgentRunner(AgentRunner):
                         # Time the request for performance tracking
                         start_time = datetime.now()
                         
-                        # Use the parent class's run method
-                        result = await super().run(
-                            current_agent, 
-                            current_input, 
+                        # Use the parent class's run method (extracted to a helper so
+                        # tests/fakes can override _execute_agent_run without requiring
+                        # a full AgentRunner implementation)
+                        result = await self._execute_agent_run(
+                            current_agent,
+                            current_input,
                             context=context,
                             max_turns=max_turns,
                             hooks=hooks,
-                            session=session
+                            session=session,
                         )
                         
                         # Calculate response time and update stats
@@ -245,16 +279,127 @@ class FallbackAgentRunner(AgentRunner):
                         
                         await self.increment_usage(model_config["provider"])
                         print(f"[DEBUG] Agent '{current_agent.name}' run complete. Result: {result}")
-                        
+
+                        # Mark this agent as executed in this run (by object id)
+                        try:
+                            current_agent_id = id(current_agent)
+                        except Exception:
+                            current_agent_id = id(current_agent)
+                        seen_agent_ids.add(current_agent_id)
+                        agent_invocation_counts[current_agent_id] = agent_invocation_counts.get(current_agent_id, 0) + 1
+
                         # Handle handoffs properly
-                        if hasattr(result, '_last_agent') and result._last_agent != current_agent:
-                            print(f"[DEBUG] Handoff detected. Last agent: {getattr(result._last_agent, 'name', str(result._last_agent))}")
-                            current_agent = result._last_agent
-                            current_input = result.input
+                        # The SDK may expose the handoff target as either `last_agent`
+                        # (property) or `_last_agent` (internal). Prefer the public
+                        # `last_agent` attribute but fall back to `_last_agent`.
+                        has_last_agent_prop = hasattr(result, 'last_agent')
+                        has__last_agent_attr = hasattr(result, '_last_agent')
+                        print(f"[DEBUG] result has last_agent prop: {has_last_agent_prop}, has _last_agent attr: {has__last_agent_attr}")
+
+                        last_agent_obj = None
+                        if has_last_agent_prop:
+                            try:
+                                last_agent_obj = result.last_agent
+                            except Exception:
+                                last_agent_obj = getattr(result, 'last_agent', None)
+                        elif has__last_agent_attr:
+                            last_agent_obj = result._last_agent
+
+                        if last_agent_obj is not None:
+                            try:
+                                last_agent_name = getattr(last_agent_obj, 'name', str(last_agent_obj))
+                            except Exception:
+                                last_agent_name = str(last_agent_obj)
+                            print(f"[DEBUG] detected last_agent: {last_agent_name}")
+                            print(f"[DEBUG] current_agent name: {getattr(current_agent, 'name', str(current_agent))}")
+                            print(f"[DEBUG] current_agent id: {id(current_agent)}, last_agent id: {id(last_agent_obj)}")
+                            print(f"[DEBUG] seen_agent_ids before handoff check: {seen_agent_ids}")
+
+                        # Only consider a handoff if there is a last_agent and it's a different agent
+                        if last_agent_obj and last_agent_obj != current_agent:
+                            handoff_agent = last_agent_obj
+                            handoff_agent_name = getattr(handoff_agent, 'name', str(handoff_agent))
+                            handoff_agent_id = id(handoff_agent)
+                            print(f"[DEBUG] Handoff detected. Last agent: {handoff_agent_name} (id={handoff_agent_id})")
+
+                            # If we've already executed this agent in the current run (by id), avoid re-invoking it
+                            if handoff_agent_id in seen_agent_ids:
+                                print(f"[Fallback] Handoff to agent '{handoff_agent_name}' ignored because it was already executed in this run (by id). Returning result to avoid duplicate runs.")
+                                return result
+
+                            # Determine handoff input from possible result fields (input, final_output, output)
+                            handoff_input = None
+                            if hasattr(result, 'input'):
+                                handoff_input = result.input
+                            if not handoff_input and hasattr(result, 'final_output'):
+                                handoff_input = getattr(result, 'final_output')
+                            if not handoff_input and hasattr(result, 'output'):
+                                handoff_input = getattr(result, 'output')
+
+                            # If the handoff doesn't include a valid input, ignore it to avoid running an agent with empty input
+                            if not handoff_input or (isinstance(handoff_input, str) and not handoff_input.strip()):
+                                print(f"[Fallback] Handoff to agent '{handoff_agent_name}' ignored because handoff input is empty or missing.")
+                                return result
+
+                            # Compute a stable key for this handoff (agent name + hash of normalized input)
+                            try:
+                                normalized_input = (str(handoff_input).strip() if handoff_input is not None else "")
+                                input_hash = hashlib.sha256(normalized_input.encode('utf-8')).hexdigest()
+                                handoff_key = (handoff_agent_name, input_hash)
+                            except Exception:
+                                handoff_key = (handoff_agent_name, str(handoff_input))
+
+                            if handoff_key in processed_handoffs:
+                                print(f"[Fallback] Handoff to agent '{handoff_agent_name}' with the same input was already processed in this run; skipping to avoid duplicate invocation.")
+                                return result
+
+                            # If the result already appears to contain inserted images (markdown),
+                            # assume the handoff was already applied (by the SDK or agent) and skip re-invocation.
+                            existing_output_text = None
+                            if hasattr(result, 'final_output') and result.final_output:
+                                existing_output_text = result.final_output
+                            elif hasattr(result, 'output') and result.output:
+                                existing_output_text = result.output
+                            elif hasattr(result, 'text') and result.text:
+                                existing_output_text = result.text
+
+                            if isinstance(existing_output_text, str):
+                                # simple heuristic: detect markdown image syntax
+                                import re
+                                if re.search(r"!\[.*\]\(.*\)", existing_output_text):
+                                    print(f"[Fallback] Detected image markdown in result output; assuming handoff already applied. Skipping explicit handoff to '{handoff_agent_name}' and returning result.")
+                                    return result
+
+                            # Otherwise, proceed with the handoff. Do NOT mark the
+                            # handoff agent as seen yet — we'll mark it once it actually
+                            # executes in the next outer loop iteration. Marking it
+                            # early can cause timing issues where the agent is skipped
+                            # incorrectly or allowed to run twice depending on how the
+                            # SDK manages handoffs internally.
+                            agent_invocation_counts[handoff_agent_id] = agent_invocation_counts.get(handoff_agent_id, 0)
+                            # Mark this handoff as processed
+                            try:
+                                # Use agent id in the handoff key for robustness
+                                if isinstance(handoff_key, tuple) and handoff_key[0] != handoff_agent_id:
+                                    handoff_key = (handoff_agent_id, handoff_key[1] if len(handoff_key) > 1 else handoff_key[1])
+                                processed_handoffs.add(handoff_key)
+                            except Exception:
+                                pass
+                            # Update current agent/input/session and mark that a handoff occurred.
+                            # We do NOT recursively call run_with_fallback because that would
+                            # reset our tracking state (seen_agent_ids / processed_handoffs) and
+                            # allow duplicate invocations. Instead, break out of the model loop
+                            # so the outer while loop restarts with the new agent/input and
+                            # the existing tracking state preserved.
+                            current_agent = handoff_agent
+                            current_input = handoff_input
                             session = getattr(result, "session", None) if hasattr(result, "session") else None
-                            print(f"[Fallback] Handoff to agent '{current_agent.name}' with input: {current_input} and session: {session}")
-                            # After handoff, restart the while True loop with the new agent/input/session
-                            break  # break out of model loop, continue with new agent
+                            print(f"[Fallback] Handoff to agent '{getattr(current_agent, 'name', str(current_agent))}' (id={handoff_agent_id}) with input: {current_input} and session: {session}")
+                            handoff_occurred = True
+                            # Break out of the current model/config loop so the outer while
+                            # iteration will continue with the handoff agent using the
+                            # same tracking sets (seen_agent_ids, processed_handoffs).
+                            break
                         else:
                             print(f"[DEBUG] No handoff. Returning result for agent '{current_agent.name}'")
                             return result
@@ -296,7 +441,14 @@ class FallbackAgentRunner(AgentRunner):
                             error_msg += f". Last error: {str(last_error)}"
                         print(f"[Fallback] {error_msg}")
                         raise Exception(error_msg)
-                # If we broke out of the model loop due to handoff, restart the while True loop
+                # If a handoff occurred above we broke out of the model loop; restart
+                # the outer while loop so the handoff agent is executed in the same
+                # run with preserved tracking state.
+                if handoff_occurred:
+                    # continue the outer while loop (it will increment iteration_count and retry)
+                    break
+                # If we broke out of the model loop for other reasons, also break to
+                # restart the outer loop.
                 break
             else:
                 error_msg = f"All LLM providers failed for agent {current_agent.name} after {max_retries} retries"
@@ -349,3 +501,12 @@ class FallbackAgentRunner(AgentRunner):
             stats["avg_response_time"] = (stats["avg_response_time"] * total_requests + response_time) / (total_requests + 1)
             
         print(f"[Stats] Provider {provider_name}: Success rate={(stats['success_count']/(stats['success_count']+stats['error_count'])):.2f}, Avg response time={stats['avg_response_time']:.2f}s")
+
+    async def _execute_agent_run(self, agent, input_data, context=None, max_turns=15, hooks=None, session=None):
+        """Helper wrapper that actually invokes the parent AgentRunner.run.
+
+        This exists so tests or fake runners can override this single method
+        to simulate agent behavior without requiring a full Agents SDK.
+        """
+        # In normal operation, delegate to the parent class implementation.
+        return await super().run(agent, input_data, context=context, max_turns=max_turns, hooks=hooks, session=session)

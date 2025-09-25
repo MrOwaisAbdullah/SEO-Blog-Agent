@@ -234,17 +234,32 @@ class SanityAdapter:
         Uploads an image to Sanity's asset store using the v1 API endpoint.
         Based on the confirmed working snippet.
         """
+        # Normalize the path to handle different path separators
+        normalized_path = os.path.normpath(image_path) if image_path else None
+        logger.info(f"[SanityAdapter.upload_image] Attempting to upload image from path: {normalized_path}")
+        logger.info(f"[SanityAdapter.upload_image] Current working directory: {os.getcwd()}")
+        logger.info(f"[SanityAdapter.upload_image] File exists check: {os.path.exists(normalized_path) if normalized_path else False}")
+        
+        # Check if file exists
+        if not os.path.exists(normalized_path):
+            error_msg = f"Image file not found at path: {normalized_path}. Current working directory: {os.getcwd()}"
+            logger.error(f"[SanityAdapter.upload_image] {error_msg}")
+            return {"success": False, "error": error_msg}
+        
         try:
             # Basic validation (from working snippet)
             from PIL import Image
-            img = Image.open(image_path)
+            img = Image.open(normalized_path)
             img.verify() # Verifies it's a valid image file
-            img_size = os.path.getsize(image_path)
-            logger.info(f"[SanityAdapter.upload_image] Validated image file: {image_path}, Size: {img_size} bytes")
+            img_size = os.path.getsize(normalized_path)
+            logger.info(f"[SanityAdapter.upload_image] Validated image file: {normalized_path}, Size: {img_size} bytes")
         except Exception as e:
-            error_msg = f"Invalid image file '{image_path}': {str(e)}"
+            error_msg = f"Invalid image file '{normalized_path}': {str(e)}"
             logger.error(f"[SanityAdapter.upload_image] {error_msg}")
             return {"success": False, "error": error_msg}
+        
+        # Update the path to use the normalized version
+        image_path = normalized_path
 
         # Construct URL with filename (from working snippet)
         filename_encoded = urllib.parse.quote(os.path.basename(image_path))
@@ -487,7 +502,7 @@ class SanityAdapter:
 
         print(f"DEBUG: Converting content of length {len(content)}")
         print(f"DEBUG: First 100 chars: {content[:100]}")
-
+        
         try:
             # 1. Use existing author from your project (configured via environment variables)
             author_id = os.environ.get("SANITY_DEFAULT_AUTHOR_ID", "default-author-id")
@@ -495,19 +510,147 @@ class SanityAdapter:
             # Ensure the author exists (this will just verify it exists)
             self.ensure_document_exists("author", author_id, {"name": author_name})
 
-            # 2. Upload Image
-            image_upload_result = self.upload_image(local_image_path)
-            if not image_upload_result.get("success"):
-                return {
-                    "status": "error",
-                    "post_id": None,
-                    "image_id": None,
-                    "image_url": None,
-                    "error": f"Failed to upload image: {image_upload_result.get('error')}"
-                }
+            # 2. Upload Image - check if it's a URL or local path
+            # Determine if image_path is a URL from Freepik/Pexel (no need to download) or local file
+            image_asset_id = None
+            image_url = None
+            
+            if local_image_path and local_image_path.startswith('http'):
+                # It's a URL - check if it's from Freepik or Pexel to use directly
+                freepik_url = 'freepik' in local_image_path.lower()
+                pexel_url = 'pexels' in local_image_path.lower()
+                
+                if freepik_url or pexel_url:
+                    # For Freepik or Pexel URLs, we'll let the main document creation process handle the URL
+                    # since Sanity can handle direct external image URLs in the content
+                    logger.info(f"Detected {('Freepik' if freepik_url else 'Pexel')} URL, will handle in main document: {local_image_path}")
+                    # To use direct URLs, we'll need to pass the URL directly as the image_asset_id
+                    # But since Sanity's image asset references need a proper asset ID, we still need to upload
+                    # However, we can try to handle this by using Sanity's asset upload directly from URL
+                    try:
+                        # Use Sanity's direct asset upload from URL functionality
+                        import tempfile
+                        import requests
+                        from urllib.parse import urlparse
+                        
+                        response = requests.get(local_image_path)
+                        response.raise_for_status()
+                        
+                        # Clean the image URL by removing query parameters to avoid file system issues
+                        parsed_url = urlparse(local_image_path)
+                        clean_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+                        
+                        # Get file extension from cleaned URL or default to .jpg
+                        ext = os.path.splitext(parsed_url.path)[1]
+                        if not ext:
+                            content_type = response.headers.get('content-type', 'image/jpeg')
+                            if 'png' in content_type:
+                                ext = '.png'
+                            elif 'gif' in content_type:
+                                ext = '.gif'
+                            else:
+                                ext = '.jpg'
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                            tmp.write(response.content)
+                            temp_image_path = tmp.name
+                        
+                        # Upload to Sanity using the temporary file
+                        image_upload_result = self.upload_image(temp_image_path)
+                        os.unlink(temp_image_path)  # Clean up temp file
+                        
+                        if image_upload_result.get("success"):
+                            image_asset_id = image_upload_result["asset_id"]
+                            image_url = image_upload_result.get("url")
+                        else:
+                            return {
+                                "status": "error",
+                                "post_id": None,
+                                "image_id": None,
+                                "image_url": None,
+                                "error": f"Failed to upload image from URL: {image_upload_result.get('error')}"
+                            }
+                    except Exception as e:
+                        return {
+                            "status": "error",
+                            "post_id": None,
+                            "image_id": None,
+                            "image_url": None,
+                            "error": f"Failed to handle image URL: {str(e)}"
+                        }
+                else:
+                    # For other URLs (like HuggingFace temporary files), download and upload to Sanity
+                    try:
+                        import tempfile
+                        import requests
+                        response = requests.get(local_image_path)
+                        response.raise_for_status()
+                        
+                        # Get file extension from URL or default to .jpg
+                        ext = os.path.splitext(local_image_path)[1]
+                        if not ext:
+                            content_type = response.headers.get('content-type', 'image/jpeg')
+                            if 'png' in content_type:
+                                ext = '.png'
+                            elif 'gif' in content_type:
+                                ext = '.gif'
+                            else:
+                                ext = '.jpg'
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                            tmp.write(response.content)
+                            temp_image_path = tmp.name
+                        
+                        # Upload to Sanity
+                        image_upload_result = self.upload_image(temp_image_path)
+                        os.unlink(temp_image_path)  # Clean up temp file
+                        
+                        if image_upload_result.get("success"):
+                            image_asset_id = image_upload_result["asset_id"]
+                            image_url = image_upload_result.get("url")
+                        else:
+                            return {
+                                "status": "error",
+                                "post_id": None,
+                                "image_id": None,
+                                "image_url": None,
+                                "error": f"Failed to upload image from URL: {image_upload_result.get('error')}"                           }
+                    except Exception as e:
+                        return {
+                            "status": "error",
+                            "post_id": None,
+                            "image_id": None,
+                            "image_url": None,
+                            "error": f"Failed to handle image URL: {str(e)}"
+                        }
+            else:
+                # It's a local file path
+                # Normalize the image path
+                normalized_image_path = os.path.normpath(local_image_path) if local_image_path else None
+                
+                # Check if file exists
+                if not os.path.exists(normalized_image_path):
+                    return {
+                        "status": "error",
+                        "post_id": None,
+                        "image_id": None,
+                        "image_url": None,
+                        "error": f"Image file not found at path: {normalized_image_path}. Current working directory: {os.getcwd()}"
+                    }
+                
+                # Use the normalized path
+                image_upload_result = self.upload_image(normalized_image_path)
+                if not image_upload_result.get("success"):
+                    return {
+                        "status": "error",
+                        "post_id": None,
+                        "image_id": None,
+                        "image_url": None,
+                        "error": f"Failed to upload image: {image_upload_result.get('error')}"
+                    }
 
-            image_asset_id = image_upload_result["asset_id"]
-            image_url = image_upload_result.get("url")
+                image_asset_id = image_upload_result["asset_id"]
+                image_url = image_upload_result.get("url")
 
             # 3. Prepare Document Content
             try:
@@ -565,7 +708,7 @@ class SanityAdapter:
                     }
                 ]
 
-            # 4. Process image blocks - upload images and replace URLs with asset references
+            # 4. Process content blocks - upload images and replace URLs with asset references
             processed_blocks = []
             for block in content_blocks:
                 if block.get("_type") == "image":
@@ -577,18 +720,20 @@ class SanityAdapter:
                             # Download and upload the image to Sanity
                             if image_url.startswith("http"):
                                 # Remote image - download first
+                                # Clean the image URL by removing query parameters to avoid file system issues
+                                clean_image_url = image_url.split('?')[0]
                                 import tempfile
                                 import requests
-                                response = requests.get(image_url)
+                                response = requests.get(clean_image_url)
                                 response.raise_for_status()
                                 
-                                # Get file extension from URL or content type
-                                ext = os.path.splitext(image_url)[1] or ".jpg"
+                                # Get file extension from cleaned URL or content type
+                                ext = os.path.splitext(clean_image_url)[1] or ".jpg"
                                 with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
                                     tmp.write(response.content)
                                     temp_image_path = tmp.name
                                 
-                                logger.info(f"[SanityAdapter.post_blog] Downloaded image to: {temp_image_path}")
+                                logger.info(f"[SanityAdapter.post_blog] Downloaded image from {clean_image_url} to: {temp_image_path}")
                                 
                                 # Upload to Sanity
                                 upload_result = self.upload_image(temp_image_path)
@@ -623,7 +768,7 @@ class SanityAdapter:
                                             {
                                                 "_key": str(uuid.uuid4()),
                                                 "_type": "span",
-                                                "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]"
+                                                "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]" 
                                             }
                                         ],
                                         "markDefs": [],
@@ -663,7 +808,7 @@ class SanityAdapter:
                                                 {
                                                     "_key": str(uuid.uuid4()),
                                                     "_type": "span",
-                                                    "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]"
+                                                    "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]" 
                                                 }
                                             ],
                                             "markDefs": [],
@@ -681,7 +826,7 @@ class SanityAdapter:
                                             {
                                                 "_key": str(uuid.uuid4()),
                                                 "_type": "span",
-                                                "text": f"[Image: {alt_text} - File not found: {image_url}]"
+                                                "text": f"[Image: {alt_text} - File not found: {image_url}]" 
                                             }
                                         ],
                                         "markDefs": [],
@@ -699,7 +844,7 @@ class SanityAdapter:
                                     {
                                         "_key": str(uuid.uuid4()),
                                         "_type": "span",
-                                        "text": f"[Image: {alt_text} - Processing error: {str(e)}]"
+                                        "text": f"[Image: {alt_text} - Processing error: {str(e)}]" 
                                     }
                                 ],
                                 "markDefs": [],
@@ -709,8 +854,12 @@ class SanityAdapter:
                     else:
                         # No URL, keep the block as is
                         processed_blocks.append(block)
+                elif block.get("_type") == "block":
+                    # Process text blocks to make sure inline images in markdown are handled properly
+                    # (though our markdown parser should prevent inline images in text blocks)
+                    processed_blocks.append(block)
                 else:
-                    # Not an image block, keep as is
+                    # Other types of blocks, keep as is
                     processed_blocks.append(block)
 
             # Update content_blocks with processed blocks

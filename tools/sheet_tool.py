@@ -211,6 +211,7 @@ def manage_sheet_data(
                      return {"status": "error", "message": "row_values is required for append_row action."}
                 logger.info(f"Appending row to {worksheet_name}: {row_values}")
                 worksheet.append_row(row_values, value_input_option=value_input_option)
+                time.sleep(0.5)  # Small delay to ensure update is processed
                 logger.info(f"Successfully appended row to {worksheet_name}")
                 return {"status": "success", "message": f"Row appended to {worksheet_name}."}
 
@@ -218,6 +219,7 @@ def manage_sheet_data(
                 if not row_values or row_index is None:
                     return {"status": "error", "message": "row_values and row_index are required for insert_row action."}
                 worksheet.insert_row(row_values, row_index, value_input_option=value_input_option)
+                time.sleep(0.5)  # Small delay to ensure update is processed
                 return {"status": "success", "message": f"Row inserted at index {row_index} in {worksheet_name}."}
 
             elif action == "update_row":
@@ -228,7 +230,23 @@ def manage_sheet_data(
                 if not isinstance(values_to_update, list):
                     return {"status": "error", "message": "For update_row, row_values or data must be a list."}
                 worksheet.update(f"A{row_index}", [values_to_update], value_input_option=value_input_option) # Update starting from column A
-                return {"status": "success", "message": f"Row {row_index} updated in {worksheet_name}."}
+                
+                # Verify that the update was successful by reading the row back
+                time.sleep(0.5)  # Small delay to ensure update is processed
+                updated_row = worksheet.row_values(row_index)
+                
+                # Compare values (making sure we're comparing the right number of values)
+                if len(updated_row) >= len(values_to_update):
+                    row_matches = all(updated_row[i] == str(values_to_update[i]) for i in range(len(values_to_update)))
+                else:
+                    # If updated row is shorter than expected, they don't match
+                    row_matches = False
+                
+                if row_matches:
+                    return {"status": "success", "message": f"Row {row_index} updated in {worksheet_name}."}
+                else:
+                    logger.error(f"Failed to update row {row_index} in {worksheet_name}. Expected: {values_to_update}, Got: {updated_row}")
+                    return {"status": "error", "message": f"Failed to update row {row_index} in {worksheet_name}. Value verification failed."}
 
             elif action == "update_cell":
                 if row_index is None or col_index is None or data is None: # data here is the cell value
@@ -237,14 +255,32 @@ def manage_sheet_data(
                 cell_value = data if isinstance(data, str) else str(data)
                 logger.info(f"Updating cell ({row_index}, {col_index}) in {worksheet_name} with value: {cell_value}")
                 worksheet.update_cell(row_index, col_index, cell_value)
-                logger.info(f"Successfully updated cell ({row_index}, {col_index}) in {worksheet_name}")
-                return {"status": "success", "message": f"Cell ({row_index}, {col_index}) updated in {worksheet_name}."}
+                
+                # Verify that the update was successful by reading the cell back
+                time.sleep(0.5)  # Small delay to ensure update is processed
+                updated_value = worksheet.cell(row_index, col_index).value
+                if updated_value == cell_value:
+                    logger.info(f"Successfully updated cell ({row_index}, {col_index}) in {worksheet_name}")
+                    return {"status": "success", "message": f"Cell ({row_index}, {col_index}) updated in {worksheet_name}."}
+                else:
+                    logger.error(f"Failed to update cell ({row_index}, {col_index}) in {worksheet_name}. Expected: {cell_value}, Got: {updated_value}")
+                    return {"status": "error", "message": f"Failed to update cell ({row_index}, {col_index}) in {worksheet_name}. Value verification failed."}
 
             elif action == "update_cells":
                 if cell_range is None or data is None: # data expected as List[List] for batch update
                     return {"status": "error", "message": "cell_range and data (List[List]) are required for update_cells action."}
                 worksheet.update(cell_range, data, value_input_option=value_input_option)
-                return {"status": "success", "message": f"Range {cell_range} updated in {worksheet_name}."}
+                
+                # Verify that the update was successful by reading the range back
+                time.sleep(0.5)  # Small delay to ensure update is processed
+                updated_range = worksheet.get(cell_range)
+                
+                # Compare the updated range with the expected data
+                if updated_range == data:
+                    return {"status": "success", "message": f"Range {cell_range} updated in {worksheet_name}."}
+                else:
+                    logger.error(f"Failed to update range {cell_range} in {worksheet_name}. Expected: {data}, Got: {updated_range}")
+                    return {"status": "error", "message": f"Failed to update range {cell_range} in {worksheet_name}. Value verification failed."}
 
             elif action == "delete_row":
                 if row_index is None:

@@ -3,7 +3,7 @@ import logging
 import re
 from agents import Agent, function_tool, ModelSettings
 from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
-from blog_agent.blog_agents import MyAgentHooks
+from blog_agent.hooks import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
 from blog_agent.custom_runner import FallbackAgentRunner
@@ -163,13 +163,13 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         **Tools:**  
         - `tavily_search_tool`: Find relevant web pages (1 credit/query).  
         - `tavily_extract_tool`: Get clean text from URLs (1 credit/5 URLs).  
-        - `tavily_crawl_tool`: Explore website structure (1 credit/5 URLs).  
+        - `tavily_crawl_tool`: Explore website structure (1 credit/1 URLs).  
         - `fetch_url_title`: Fetch URL titles and snippets.  
         - SerpApi `web_search_tool`(fallback): Keyword data.  
         """,
         tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title],
         hooks=MyAgentHooks(),
-        model=custom_runner.get_model_by_name("cohere"),
+        model=custom_runner.get_model_by_name("gemini-2.5-flash"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
@@ -200,8 +200,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
           - Content Summary (from finding)
           - Source URLs (from finding) - IMPORTANT: Convert list of URLs to a single comma-separated string
           - Source Titles (from finding) - IMPORTANT: Convert list of titles to a single comma-separated string
-          - Approve/Disapprove (set to "Approve" by default - user can manually change to "Disapprove" if needed. Both "Approve" and "Approved" are considered approved status)
-          - Generated (set to "no" for manual review)
+          - Generated (set to "No" for manual review)
         3. **Validation**:
         - Ensure all required fields are present or default to "N/A" where applicable.
         - Do not fabricate data; rely on the input findings.
@@ -225,7 +224,6 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
             "A brief summary of the content",
             "https://example.com, https://example2.com",  // Convert list to comma-separated string
             "Example Title, Another Title",  // Convert list to comma-separated string
-            "Approved",
             "No"
           ]
         }

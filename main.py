@@ -283,20 +283,14 @@ async def generate_content(api_key: str = Security(verify_api_key)):
 async def post_content(api_key: str = Security(verify_api_key)):
     """
     Executes the Posting Agent using fallbacks.
-    Expects a JSON body containing the necessary data for posting
-    (e.g., title, content, categories, image_path, etc.).
-    The structure should match what the Posting Agent expects.
-    Example body:
-    {
-      "title": "My Blog Post",
-      "summary": "A summary...",
-      "content": "The full markdown content...",
-      "categories": ["AI", "Marketing"],
-      ...
-    }
+    This endpoint triggers the posting workflow which:
+    1. Gets the next approved, unpublished post from the Google Sheet
+    2. Runs the Preparation Agent to prepare the post data
+    3. Invokes the contextual image insertion agent to add relevant images
+    4. Runs the posting agent to publish the post to Sanity CMS
+    5. Updates the Google Sheet to mark the post as published
     """
     try:
-        prompt_for_agent = f"Post the content from the generated_posts worksheet to the blog platform."
         result = await run_posting_workflow()
         
         # Extract a simple success message

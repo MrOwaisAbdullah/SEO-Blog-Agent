@@ -143,23 +143,32 @@ class MarkdownToSanityConverter:
             elif node_type == 'link':
                 destination = getattr(current_node, 'destination', '')
                 title = getattr(current_node, 'title', '')
+                # Validate that destination is a proper URL
                 if destination:
-                    mark_key = self._get_next_mark_key()
-                    mark_def = {
-                        "_key": mark_key,
-                        "_type": "link",
-                        "href": destination
-                    }
-                    if title:
-                        mark_def["title"] = title
-                    mark_defs.append(mark_def)
-                    
-                    new_marks = current_marks.copy()
-                    new_marks.append(mark_key)
-                    child = current_node.first_child
-                    while child:
-                        process_node_inline(child, new_marks)
-                        child = child.nxt
+                    # Check if URL is properly formatted
+                    if not destination.startswith(('http://', 'https://', '/', '#', 'mailto:', 'tel:')):
+                        # If not a proper URL, treat as text instead of link
+                        child = current_node.first_child
+                        while child:
+                            process_node_inline(child, current_marks)
+                            child = child.nxt
+                    else:
+                        mark_key = self._get_next_mark_key()
+                        mark_def = {
+                            "_key": mark_key,
+                            "_type": "link",
+                            "href": destination
+                        }
+                        if title:
+                            mark_def["title"] = title
+                        mark_defs.append(mark_def)
+                        
+                        new_marks = current_marks.copy()
+                        new_marks.append(mark_key)
+                        child = current_node.first_child
+                        while child:
+                            process_node_inline(child, new_marks)
+                            child = child.nxt
                 else:
                     # Process children without link mark
                     child = current_node.first_child
@@ -206,6 +215,24 @@ class MarkdownToSanityConverter:
                             spans.append(span)
                 elif literal:  # Handle non-string literals
                     span = self._create_simple_span(str(literal), current_marks.copy())
+                    if span:
+                        spans.append(span)
+                        
+            elif node_type == 'image':
+                # Process inline images (images within text paragraphs)
+                destination = getattr(current_node, 'destination', '')
+                title = getattr(current_node, 'title', '')
+                alt_text = ''
+                
+                # Extract alt text from the first child if it's text
+                if current_node.first_child and current_node.first_child.t == 'text':
+                    alt_text = getattr(current_node.first_child, 'literal', '')
+                
+                if destination:
+                    # Add image as a separate block rather than inline content as per Sanity's Portable Text spec
+                    # However, if the image is in the middle of a paragraph, we'll create a placeholder
+                    image_placeholder = f'![{alt_text}]({destination} "{title}")'
+                    span = self._create_simple_span(image_placeholder, current_marks.copy())
                     if span:
                         spans.append(span)
                         
@@ -375,6 +402,14 @@ class MarkdownToSanityConverter:
         elif node_type == 'image':
             # Handle standalone image nodes
             self._create_image_block(node)
+                
+        elif node_type == 'link':
+            # Handle standalone link nodes (though these should be rare in CommonMark)
+            # Usually links will be processed as inline elements within blocks
+            spans, mark_defs = self._parse_inline_content(node)
+            if spans:
+                block = self._create_block('normal', spans, mark_defs)
+                self.blocks.append(block)
                 
         else:
             # For unknown block types, try to extract text

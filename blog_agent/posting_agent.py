@@ -1,8 +1,6 @@
-# blog_agent/posting_agent.py
-
 import logging
-from agents import Agent, ModelSettings, AgentHooks, handoff
-from tools.tools import post_to_sanity_tool, fetch_internal_links_tool, insert_contextual_images_tool # Ensure correct import paths
+from agents import Agent, ModelSettings, AgentHooks, handoff, trace
+from tools.tools import post_to_sanity_tool, fetch_internal_links_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
 from blog_agent.image_agent import image_selection_agent, contextual_image_insertion_agent  # Import the new image agent tools
 from typing import Dict, Any, List, Optional
@@ -36,7 +34,7 @@ preparation_agent = Agent(
     # Preparation Agent Prompt
 
     ## Role and Objective
-    You are the Preparation Agent, responsible for selecting an approved, unpublished blog post from the `approved_unpublished` Google Sheet, enhancing it with links and an image, and outputting a structured string in a specific format.
+    You are the Preparation Agent, responsible for selecting an approved, unpublished blog post from the `approved_unpublished` Google Sheet, enhancing it with links and an image, and outputting a structured string in a specific format. after preparing the output you will handoff to the Contextual Image Insertion Agent to insert images into the content.
 
     ## Instructions
 
@@ -77,7 +75,7 @@ preparation_agent = Agent(
       - External links: Use any in `Generated Content` or leave `EXTERNAL_LINKS_MD` empty.
 
     4. **Fetch Image**
-      - Use `get_blog_image_tool` with `TITLE` and `Generated Content` to get a high-quality, relevant image.
+      - Use `get_blog_image_tool` with `TITLE` (same as `Keyword/Topic` from index 0) and `Summary` (index 4 from sheet data) to get a high-quality, relevant image.
       - This tool will generate an AI image first, evaluate its quality, and use stock photos as fallback.
       - **IMPORTANT**: The tool returns a JSON response. You MUST extract the `image_url` field from this JSON response.
       - Example JSON response format:
@@ -113,8 +111,6 @@ preparation_agent = Agent(
       IMAGE_URL: [...]
       ALT_TEXT: [...]
       SLUG: [...]
-      INTERNAL_LINKS_MD: [...]
-      EXTERNAL_LINKS_MD: [...]
       FAQS: [...]
       SOURCE_KEYWORD_TOPIC: [...]
       === POST_DATA_END ===
@@ -130,13 +126,13 @@ preparation_agent = Agent(
       IMAGE_URL: C:\\Users\\KTECH~1\\AppData\\Local\\Temp\\tmpnjije_gi.png
       ALT_TEXT: Brand consistency in social media illustration
       SLUG: brand-consistency-in-social-media
-      INTERNAL_LINKS_MD: ## Related Posts
-      - [Social Media Strategy](/blog/social-media-strategy)
-      EXTERNAL_LINKS_MD: 
       FAQS: [{"question": "What is brand consistency?", "answer": "It ensures a unified brand identity..."}]
       SOURCE_KEYWORD_TOPIC: Brand consistency in social media
       === POST_DATA_END ===
       ```
+
+    7. **Handoff**
+      - After outputting the structured string, immediately handoff to the Contextual Image Insertion Agent to insert images into the content.
 
     ## Tools
     - `manage_sheet_data_tool`
@@ -161,94 +157,58 @@ preparation_agent = Agent(
 posting_agent = Agent(
     name="Posting Agent",
     instructions="""
-    You are the Posting Agent. Your ONLY job is to publish blog posts to Sanity CMS and update Google Sheets.
+    You are the Posting Agent. Your job is to publish blog posts to Sanity CMS and update Google Sheets.
     
-    YOU MUST CALL THE `post_to_sanity_tool` TOOL. THIS IS NOT OPTIONAL.
-    
-    Step 1: Check input
-    - If you see "STATUS: NO_POSTS_FOUND", return:
-    {"status": "no_posts_found", "message": "No posts ready for publishing."}
-    
-    Step 2: Extract data
-    - You will receive data between === markers like this:
+    ## INPUT FORMAT:
+    You will receive data between these markers:
     === POST_DATA_START ===
-    KEYWORD_TOPIC: [...]
-    TITLE: [...]
-    SUMMARY: [...]
-    CONTENT_WITH_LINKS: [...]
-    CATEGORIES: [...]
-    IMAGE_URL: [...]
-    ALT_TEXT: [...]
-    SLUG: [...]
-    INTERNAL_LINKS_MD: [...]
-    EXTERNAL_LINKS_MD: [...]
-    FAQS: [...]
-    SOURCE_KEYWORD_TOPIC: [...]
+    KEYWORD_TOPIC: [value]
+    TITLE: [value]
+    SUMMARY: [value]
+    CONTENT_WITH_LINKS: [value]
+    CATEGORIES: [value]
+    IMAGE_URL: [value]
+    ALT_TEXT: [value]
+    SLUG: [value]
+    INTERNAL_LINKS_MD: [value]
+    EXTERNAL_LINKS_MD: [value]
+    FAQS: [value]
+    SOURCE_KEYWORD_TOPIC: [value]
     === POST_DATA_END ===
     
-    Step 3: Extract all fields from between the === markers
+    ## CRITICAL STEPS:
+    1. FIND the data between === markers
+    2. PARSE each field (TITLE, SUMMARY, CONTENT_WITH_LINKS, etc.)
+    3. IMMEDIATELY call `post_to_sanity_tool` with these values:
+       - title: the extracted TITLE
+       - summary: the extracted SUMMARY
+       - content: the extracted CONTENT_WITH_LINKS (preserve all markdown formatting for proper rendering)
+       - categories: the extracted CATEGORIES (as a JSON list)
+       - image_path: the extracted IMAGE_URL
+       - slug: the extracted SLUG
+       - alt_text: the extracted ALT_TEXT
+       - faqs: the extracted FAQS (as a JSON list)
+    4. After successful posting, update the Google Sheet:
+       - Find the row in "generated_posts" worksheet using SOURCE_KEYWORD_TOPIC to match "Title" column
+       - Update the "Published" column for that row to "Yes"
+    5. Record in published_posts worksheet:
+       - Add a new row to "published_posts" worksheet with:
+         - Keyword/Topic: SOURCE_KEYWORD_TOPIC
+         - Post URL: "https://owaisabdullah.dev/blog/[SLUG]"
+         - Error: empty string if successful
     
-    Step 4: Separate main content from additional content
-    - The CONTENT_WITH_LINKS field may contain embedded additional content (FAQs, internal links, etc.)
-    - Look for common patterns that indicate embedded content:
-      * FAQ sections that start with "## Frequently Asked Questions" or similar headings
-      * Internal link sections that start with "## Related Posts" or similar headings
-      * External link sections that start with "## External Resources" or similar headings
-      * Any content that repeats what's already in the dedicated FAQ, internal links, or external links fields
-    - Extract the main blog content by removing any embedded additional content
-    - Ensure the main content flows naturally without embedded FAQ or link sections
-    - The main content should only contain the core blog post text
-    - Preserve the natural flow and structure of the content
-    - Do NOT include content that duplicates the dedicated fields (FAQs, INTERNAL_LINKS_MD, EXTERNAL_LINKS_MD)
+    ## MARKDOWN FORMATTING REQUIREMENTS:
+    - Preserve all markdown formatting exactly as provided in CONTENT_WITH_LINKS
+    - Ensure links follow format: [link text](https://example.com)
+    - Ensure images follow format: ![alt text](image-url)
+    - Preserve all headings, lists, bold/italic formatting
+    - Do NOT modify or reformat the content - pass it exactly as received
+    - All existing internal links and contextual images must be preserved
     
-    Step 5: MANDATORY ACTION - Call post_to_sanity_tool with:
-    {
-      "title": "[TITLE]",
-      "summary": "[SUMMARY]",
-      "content": "[MAIN_CONTENT]",  # Only the main blog content, without embedded FAQs or links
-      "categories": [CATEGORIES],
-      "image_path": "[IMAGE_URL]",
-      "slug": "[SLUG]",
-      "alt_text": "[ALT_TEXT]",
-      "faqs": [FAQS]
-    }
-    
-    Step 6: After successfully posting to Sanity, update the Google Sheet:
-    - Use `manage_sheet_data_tool` with:
-      - `action="find_row_by_key"`
-      - `worksheet_name="generated_posts"`
-      - `key_column="Keyword/Topic"`
-      - `key_value="[SOURCE_KEYWORD_TOPIC]"`
-    - Get the row index from the result
-    - Convert the row index to a cell range. For example, if the row index is 2 and the Published column is column G, the cell range would be "G2"
-    - Use `manage_sheet_data_tool` again with:
-      - `action="update_cells"`
-      - `worksheet_name="generated_posts"`
-      - `cell_range="G[row_index]"` (where [row_index] is the row number from the previous step)
-      - `data=[["Yes"]]` (note the double brackets for a 2D array - this is required for update_cells)
-    
-    Step 7: Record published post details in the published_posts worksheet:
-    - After successfully posting to Sanity, record the published post details in the `published_posts` worksheet
-    - Use `manage_sheet_data_tool` with:
-      - `action="append_row"`
-      - `worksheet_name="published_posts"`
-      - `row_values` should contain 4 columns in this order:
-        1. Keyword/Topic: "[SOURCE_KEYWORD_TOPIC]"
-        2. Featured Image URL: "[IMAGE_URL]" (the URL from Sanity or the local path)
-        3. Post URL: "https://owaisabdullah.dev/blog/[SLUG]" (constructed by joining the base URL with the slug)
-        4. Error: "" (empty string if successful, error message if failed)
-    - Example tool call:
-      {
-        "action": "append_row",
-        "worksheet_name": "published_posts",
-        "row_values": ["Brand consistency in social media", "https://cdn.sanity.io/images/...", "https://owaisabdullah.dev/blog/brand-consistency-in-social-media", ""]
-      }
-    
-    IMPORTANT: If you don't call post_to_sanity_tool, you have FAILED at your job.
-    IMPORTANT: You must extract only the main blog content, not embedded FAQs or link sections.
-    IMPORTANT: You must update the Google Sheet after posting to Sanity.
-    IMPORTANT: You must record the published post details in the published_posts worksheet.
-    IMPORTANT: Do NOT duplicate content between the main content and dedicated fields.
+    ## CRITICAL:
+    - Step 3 (calling post_to_sanity_tool) is REQUIRED - you MUST do this
+    - After posting succeeds, do steps 4 and 5 to update sheets
+    - If you skip calling post_to_sanity_tool, you have completely failed
     """,
     tools=[post_to_sanity_tool, manage_sheet_data_tool],
     hooks=MyAgentHooks(),
@@ -263,8 +223,8 @@ async def run_posting_workflow() -> Dict[str, Any]:
     """
     Executes the complete posting workflow:
     1. Runs the Preparation Agent to select and prepare a post.
-    2. If preparation is successful, hands off to the Contextual Image Insertion Agent.
-    3. After contextual images are inserted, hands off to the Posting Agent.
+    2. The Preparation Agent automatically hands off to the Contextual Image Insertion Agent.
+    3. After contextual images are inserted, the Posting Agent is called.
     4. Returns the final result.
     """
     logger.info("Starting the complete posting workflow...")
@@ -273,70 +233,122 @@ async def run_posting_workflow() -> Dict[str, Any]:
     max_turns = 50
 
     try:
+        with trace("Posting Workflow"):
         # --- Step 1: Run Preparation Agent ---
-        logger.info("Running Preparation Agent...")
-        preparation_result = await custom_runner.run_with_fallback(
-            preparation_agent,
-            "Prepare the next blog post from the approved_unpublished worksheet for publishing.",
-            max_retries=max_retries,
-            max_turns=max_turns
-        )
-        
-        preparation_output = preparation_result.final_output if hasattr(preparation_result, 'final_output') else str(preparation_result)
+        # The preparation agent will handle getting the post from the sheet, 
+        # preparing the data format with === markers, and automatically 
+        # handing off to the contextual image agent for image insertion
+            logger.info("Running Preparation Agent (which will handoff to Contextual Image Agent)...")
+            preparation_result = await custom_runner.run_with_fallback(
+                preparation_agent,
+                "Prepare the next blog post from the approved_unpublished worksheet for publishing.",
+                max_retries=max_retries,
+                max_turns=max_turns
+            )
 
-        # --- Step 2: Process Preparation Agent Output (String) ---
-        # Ensure the output is a string. If it's not, convert it or handle the error.
-        if not isinstance(preparation_output, str):
-            logger.warning(f"Preparation Agent output is not a string. Converting to string. Type was: {type(preparation_output)}")
-            preparation_output_str = str(preparation_output)
-        else:
-            preparation_output_str = preparation_output
+            # Normalize the preparation result: it can be a RunResult-like object, a dict, or a string.
+            def _extract_result_payload(res):
+                # Try common attrs first
+                payload_text = None
+                payload_dict = None
+                try:
+                    if hasattr(res, 'final_output') and res.final_output is not None:
+                        if isinstance(res.final_output, (dict, list)):
+                            payload_dict = res.final_output
+                        else:
+                            payload_text = str(res.final_output)
+                    elif hasattr(res, 'output') and res.output is not None:
+                        if isinstance(res.output, (dict, list)):
+                            payload_dict = res.output
+                        else:
+                            payload_text = str(res.output)
+                    elif hasattr(res, 'input') and res.input is not None:
+                        if isinstance(res.input, (dict, list)):
+                            payload_dict = res.input
+                        else:
+                            payload_text = str(res.input)
+                    elif isinstance(res, dict):
+                        payload_dict = res
+                    elif isinstance(res, list):
+                        payload_dict = {"data": res}
+                    else:
+                        payload_text = str(res)
+                except Exception:
+                    payload_text = str(res)
+                return payload_text, payload_dict
 
-        # Basic check: if it looks like a "no posts found" message, handle it.
-        # This is fragile but might work if the prep agent is consistent.
-        if "no_posts_found" in preparation_output_str or "No approved, unpublished posts found" in preparation_output_str:
-             logger.info("Preparation Agent indicated no posts are ready.")
-             return {"status": "no_posts_found", "message": "Preparation agent reported no posts available for publishing.", "details": preparation_output_str[:200]}
+            preparation_text, preparation_dict = _extract_result_payload(preparation_result)
+            logger.info(f"Preparation result (text): {preparation_text}")
+            logger.info(f"Preparation result (dict): {preparation_dict}")
 
-        # --- Step 3: Hand off to Contextual Image Insertion Agent ---
-        logger.info("Handing off to Contextual Image Insertion Agent...")
-        
-        # Simply pass the preparation output to the contextual image insertion agent
-        # The agent will extract what it needs
-        contextual_result = await custom_runner.run_with_fallback(
-            contextual_image_insertion_agent,
-            f"Insert contextual images into the following blog post:\n\n{preparation_output_str}",
-            max_retries=max_retries,
-            max_turns=max_turns
-        )
-        
-        contextual_output = contextual_result.final_output if hasattr(contextual_result, 'final_output') else str(contextual_result)
+            # If the tool returned a structured dict with sheet data, treat that as a valid brief
+            if isinstance(preparation_dict, dict):
+                # Typical sheet tool shape: {"status": "success", "data": [...], "row_index": 2}
+                status = preparation_dict.get('status') or preparation_dict.get('result')
+                data_field = preparation_dict.get('data') if 'data' in preparation_dict else preparation_dict.get('row') if 'row' in preparation_dict else None
+                if status == 'success' and data_field:
+                    preparation_output = preparation_dict
+                else:
+                    # Fallback to text payload if dict indicates no data
+                    preparation_output = preparation_text or str(preparation_result)
+            else:
+                preparation_output = preparation_text or str(preparation_result)
 
-        # --- Step 4: Run Posting Agent with Contextual Images Output ---
-        logger.info("Running Posting Agent with contextual images output...")
-        # Pass the contextual image agent's output directly to the Posting Agent
-        posting_result = await custom_runner.run_with_fallback(
-            posting_agent,
-            f"Publish the blog post with {contextual_output}",
-            max_retries=max_retries,
-            max_turns=max_turns
-        )
-        
-        posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
+            # Basic check: if it looks like a "no posts found" message, handle it.
+            if (isinstance(preparation_output, str) and ("no_posts_found" in preparation_output or "No approved, unpublished posts found" in preparation_output)) or (
+                isinstance(preparation_output, dict) and (preparation_output.get('status') == 'error' or not preparation_output.get('data'))
+            ):
+                logger.info("Preparation Agent indicated no posts are ready.")
+                return {"status": "no_posts_found", "message": "Preparation agent reported no posts available for publishing.", "details": (str(preparation_output)[:200] if preparation_output is not None else None)}
 
-        logger.info("Posting workflow completed.")
-        # Return the Posting Agent's output directly
-        return {"status": "completed", "data": posting_output}
+            # At this point, preparation_output should contain the complete post data
+            # in the structured === POST_DATA_START === format. Instead of relying on
+            # SDK-level handoffs, explicitly run the Contextual Image Insertion Agent
+            # with the preparation output, then pass that result to the Posting Agent.
+            import re
+            logger.info("Running Contextual Image Insertion Agent with preparation output (explicit, no SDK handoff)...")
+            contextual_result = await custom_runner.run_with_fallback(
+                contextual_image_insertion_agent,
+                preparation_output,
+                max_retries=max_retries,
+                max_turns=max_turns,
+            )
 
-    except Exception as e:
-        logger.error(f"Error in posting workflow: {e}", exc_info=True)
-        return {"status": "error", "error": f"Unexpected error in workflow: {str(e)}"}
-        
-        posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
+            # Normalize the contextual agent result
+            def _extract_text(res):
+                try:
+                    if hasattr(res, 'final_output') and res.final_output is not None:
+                        return str(res.final_output)
+                    if hasattr(res, 'output') and res.output is not None:
+                        return str(res.output)
+                    if hasattr(res, 'input') and res.input is not None:
+                        return str(res.input)
+                    return str(res)
+                except Exception:
+                    return str(res)
 
-        logger.info("Posting workflow completed.")
-        # Return the Posting Agent's output directly
-        return {"status": "completed", "data": posting_output}
+            contextual_text = _extract_text(contextual_result)
+            has_images = bool(re.search(r"!\[.*\]\(.*\)", contextual_text))
+            logger.info(f"Contextual agent produced image markdown: {has_images}")
+
+            print("Running Posting Agent with prepared data (contextual images inserted)...")
+            # Pass the contextualized data to the Posting Agent
+            posting_result = await custom_runner.run_with_fallback(
+                posting_agent,
+                f"""Publish the following blog post:
+
+                {contextual_text}
+
+                REMEMBER: You MUST call the post_to_sanity_tool to complete the task.""",
+                max_retries=max_retries,
+                max_turns=max_turns,
+            )
+            
+            posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
+
+            logger.info("Posting workflow completed.")
+            # Return the Posting Agent's output directly
+            return {"status": "completed", "data": posting_output}
 
     except Exception as e:
         logger.error(f"Error in posting workflow: {e}", exc_info=True)

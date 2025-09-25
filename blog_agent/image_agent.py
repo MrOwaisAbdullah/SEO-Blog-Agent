@@ -104,6 +104,25 @@ contextual_image_insertion_agent = Agent(
     instructions="""
     You are an expert at identifying optimal positions for contextual images in blog content.
     
+    ## INPUT FORMAT:
+    You will receive blog content to enhance with contextual images. The content may come with additional metadata in the following format:
+    === POST_DATA_START ===
+    KEYWORD_TOPIC: [value]
+    TITLE: [value]
+    SUMMARY: [value]
+    CONTENT_WITH_LINKS: [Main content that needs images - this is what you'll modify]
+    CATEGORIES: [value]
+    IMAGE_URL: [value]
+    ALT_TEXT: [value]
+    SLUG: [value]
+    INTERNAL_LINKS_MD: [value]
+    EXTERNAL_LINKS_MD: [value]
+    FAQS: [value]
+    SOURCE_KEYWORD_TOPIC: [value]
+    === POST_DATA_END ===
+    
+    OR you may receive just the content directly.
+    
     ## Process:
     1. **Analyze Content Structure**: Examine the blog content to identify major sections and natural breakpoints
     2. **Identify Image Opportunities**: Find positions where images would enhance understanding or engagement
@@ -186,6 +205,29 @@ contextual_image_insertion_agent = Agent(
     ![Person wearing smart glasses](https://example.com/image-url.jpg)  # WRONG - example URL
     ```
     
+    ## CRITICAL OUTPUT REQUIREMENTS:
+    After inserting images, you MUST return the data in the SAME FORMAT in which you received it:
+    
+    If you received data starting with === POST_DATA_START ===, then return:
+    ```text
+    === POST_DATA_START ===
+    KEYWORD_TOPIC: [original value or modified as needed]
+    TITLE: [original value or modified as needed]
+    SUMMARY: [original value or modified as needed]
+    CONTENT_WITH_LINKS: [this is the content you modified by inserting images]
+    CATEGORIES: [original value or modified as needed]
+    IMAGE_URL: [original value or modified as needed]
+    ALT_TEXT: [original value or modified as needed]
+    SLUG: [original value or modified as needed]
+    INTERNAL_LINKS_MD: [original value or modified as needed]
+    EXTERNAL_LINKS_MD: [original value or modified as needed]
+    FAQS: [original value or modified as needed]
+    SOURCE_KEYWORD_TOPIC: [original value or modified as needed]
+    === POST_DATA_END ===
+    ```
+    
+    If you received just the content, return just the modified content.
+    
     ## Critical Requirements:
     - **IMPORTANT**: You MUST use `get_stock_image_tool` to find real images
     - **IMPORTANT**: Do NOT use placeholder/example URLs like "https://example.com/image-url.jpg"
@@ -193,6 +235,10 @@ contextual_image_insertion_agent = Agent(
     - **IMPORTANT**: Always extract the actual URL from the `get_stock_image_tool` response
     - **IMPORTANT**: Use proper markdown image syntax with exclamation mark (!)
     - **IMPORTANT**: Place each image on its own line with appropriate spacing
+    - **CRITICAL**: Preserve ALL existing content formatting, links, and structure
+    - **CRITICAL**: Do NOT modify existing markdown elements, only ADD new images
+    - **CRITICAL**: If you received data with === POST_DATA_START === markers, return it with the same markers
+    - **CRITICAL**: Only the CONTENT_WITH_LINKS field should be modified with inserted images
     
     ## Example Good Insertion in Context:
     ```markdown
@@ -207,7 +253,26 @@ contextual_image_insertion_agent = Agent(
     Your visual elements should reflect your brand's core values and messaging.
     ```
     
-    ## Output Format:
+    ## Output Format (when data starts with === POST_DATA_START ===):
+    Return the complete data structure with the same markers and fields, only modifying CONTENT_WITH_LINKS:
+    ```text
+    === POST_DATA_START ===
+    KEYWORD_TOPIC: [value]
+    TITLE: [value]
+    SUMMARY: [value]
+    CONTENT_WITH_LINKS: [Your modified content with inserted images]
+    CATEGORIES: [value]
+    IMAGE_URL: [value]
+    ALT_TEXT: [value]
+    SLUG: [value]
+    INTERNAL_LINKS_MD: [value]
+    EXTERNAL_LINKS_MD: [value]
+    FAQS: [value]
+    SOURCE_KEYWORD_TOPIC: [value]
+    === POST_DATA_END ===
+    ```
+    
+    ## Output Format (if data is just content):
     Return a JSON object with:
     {
       "content_with_images": "Original content with strategically placed images using PROPER MARKDOWN SYNTAX",
@@ -229,14 +294,10 @@ contextual_image_insertion_agent = Agent(
       ]
     }
     
-    IMPORTANT: Always return valid JSON in a code block format like:
-    ```json
-    {
-      "content_with_images": "...",
-      "images_inserted": [...],
-      "images_skipped": [...]
-    }
-    ```
+    When inserting images, use exact markdown format:
+    ![Description](URL "Title")
+    Do NOT modify existing links or other markdown elements in the content.
+    Preserve all existing formatting, links, and structure in the content.
     """,
     tools=[
         get_stock_image_tool,
@@ -350,19 +411,6 @@ image_selection_agent = Agent(
         get_stock_image_tool,
         image_quality_evaluation_agent.as_tool(tool_name="image_quality_evaluation_agent", tool_description="Evaluates image quality and relevance for blog posts")
     ],
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
-    model_settings=ModelSettings(temperature=0.7),
+    model=custom_runner.get_model_by_name("cohere"),
+    model_settings=ModelSettings(temperature=0.7)
 )
-
-if __name__ == "__main__":
-    # Example usage
-    import asyncio
-    
-    async def test_image_selection():
-        result = await Runner.run(image_selection_agent, "Brand Consistency in Social Media",
-            "Brand Consistency in Social Media",
-            "Learn how to maintain a consistent brand voice across all social media platforms..."
-        )
-        print(json.dumps(result.final_output, indent=2))
-        
-    asyncio.run(test_image_selection())

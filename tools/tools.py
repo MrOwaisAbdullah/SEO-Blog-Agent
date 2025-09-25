@@ -329,9 +329,15 @@ def get_stock_image_tool(keyword: str):
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         photo = response.json()['photos'][0]
-        return {"url": photo['src']['medium'], "alt_text": f"{keyword} stock image"}
-    except:
-        return {"error": "Failed to fetch stock image from Pexels"}
+        # Ensure the URL uses proper forward slashes and is properly formatted
+        image_url = photo['src']['medium'].replace('\\\\', '/').replace(' ', '%20')
+        # Validate that the URL is properly formatted
+        if not image_url.startswith('http'):
+            image_url = 'https://' + image_url.lstrip('https://').lstrip('http://')
+        return {"image_url": image_url, "alt_text": f"{keyword} stock image", "source": "Pexels", "evaluation_score": 8.5, "feedback": "High quality stock photo from Pexels"}
+    except Exception as e:
+        logger.error(f"Failed to fetch stock image from Pexels: {e}")
+        return {"error": f"Failed to fetch stock image from Pexels: {str(e)}"}
 
 @function_tool
 def generate_image_tool(keyword: str, custom_prompt: str = None):
@@ -364,19 +370,16 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
         response.raise_for_status()
         task_response = response.json()
         
+        # Import time module here to fix scope issue
+        import time
+        
         # Check if we got an immediate result or need to poll
         if "data" in task_response and "generated" in task_response["data"] and task_response["data"]["generated"]:
-            # Immediate result
+            # Immediate result - return URL directly for Freepik
             image_url = task_response["data"]["generated"][0]
-            image_response = requests.get(image_url)
-            image_response.raise_for_status()
-            image = Image.open(BytesIO(image_response.content))
-            # Use a cross-platform temporary directory
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                image.save(tmp.name)
-                file_path = tmp.name
-            return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Freepik"}
+            logger.info(f"Successfully retrieved image URL from Freepik: {image_url}")
+            # Return in format expected by image_selection_agent
+            return {"image_url": image_url, "alt_text": f"{keyword} illustration", "source": "Freepik", "evaluation_score": 9.0, "feedback": "High quality image from Freepik"}
         elif "data" in task_response and "task_id" in task_response["data"]:
             # Need to poll for result
             task_id = task_response["data"]["task_id"]
@@ -393,16 +396,11 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
                     if "data" in task_status and "status" in task_status["data"]:
                         status = task_status["data"]["status"]
                         if status == "COMPLETED" and "generated" in task_status["data"] and task_status["data"]["generated"]:
+                            # Completed - return URL directly for Freepik
                             image_url = task_status["data"]["generated"][0]
-                            image_response = requests.get(image_url)
-                            image_response.raise_for_status()
-                            image = Image.open(BytesIO(image_response.content))
-                            # Use a cross-platform temporary directory
-                            import tempfile
-                            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                                image.save(tmp.name)
-                                file_path = tmp.name
-                            return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Freepik"}
+                            logger.info(f"Successfully retrieved image URL from Freepik: {image_url}")
+                            # Return in format expected by image_selection_agent
+                            return {"image_url": image_url, "alt_text": f"{keyword} illustration", "source": "Freepik", "evaluation_score": 9.0, "feedback": "High quality image from Freepik"}
                         elif status == "FAILED":
                             return {"error": "Freepik image generation failed"}
                 except Exception as poll_error:
@@ -413,7 +411,7 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
     except Exception as e:
         logger.error(f"Freepik failed: {str(e)}")
 
-    # Try Hugging Face (fallback)
+    # Try Hugging Face (fallback) - still needs to save locally
     try:
         client = InferenceClient(
             provider="hf-inference",
@@ -423,88 +421,27 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
         image = client.text_to_image(prompt)
         # Use a cross-platform temporary directory
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            image.save(tmp.name)
-            file_path = tmp.name
-        return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Hugging Face"}
+        import time
+        # Create a more persistent temporary file name
+        timestamp = int(time.time())
+        temp_dir = tempfile.gettempdir()
+        file_path = os.path.join(temp_dir, f"blog_image_{timestamp}.png")
+        image.save(file_path)
+        # Verify the file was created
+        if os.path.exists(file_path):
+            logger.info(f"Successfully created image file: {file_path}")
+            return {"image_url": file_path, "alt_text": f"{keyword} illustration", "source": "Hugging Face", "evaluation_score": 8.0, "feedback": "AI generated image from Hugging Face"}
+        else:
+            logger.error(f"Failed to create image file: {file_path}")
+            return {"error": "Failed to save generated image to file"}
     except Exception as e:
-        logger.error(f"Hugging Face failed: {str(e)}")
+        error_msg = f"Hugging Face failed: {str(e)}"
+        logger.error(error_msg)
+        # If it's a payment issue, provide a more specific error
+        if "402" in str(e) or "payment" in str(e).lower() or "credit" in str(e).lower():
+            return {"error": "Hugging Face image generation failed due to payment/credit issues. Please check your subscription or billing details."}
 
     return {"error": "All image generation services failed"}
-
-@function_tool
-async def insert_contextual_images_tool(
-    content: str,
-    title: str,
-    max_images: int = 2
-) -> Dict[str, Any]:
-    """
-    Inserts contextual images into blog content at strategic positions.
-    
-    Args:
-        content (str): The blog post content in Markdown format
-        title (str): The blog post title
-        max_images (int): Maximum number of images to insert (default: 2)
-        
-    Returns:
-        Dict[str, Any]: Result containing content with inserted images and metadata
-    """
-    try:
-        # Import the custom runner and contextual image agent
-        from blog_agent.custom_runner import FallbackAgentRunner
-        from blog_agent.image_agent import contextual_image_insertion_agent
-        
-        custom_runner = FallbackAgentRunner()
-        
-        # Run the contextual image insertion agent
-        result = await custom_runner.run_with_fallback(
-            contextual_image_insertion_agent,
-            f"Insert contextual images into the following blog post:\n\nTitle: {title}\n\nContent:\n{content}\n\nMaximum images to insert: {max_images}",
-            max_turns=30
-        )
-        
-        # Extract the final output
-        final_output = result.final_output if hasattr(result, 'final_output') else str(result)
-        
-        # Try to parse as JSON if it's a string
-        if isinstance(final_output, str):
-            try:
-                # Extract JSON from code block if present
-                import re
-                json_match = re.search(r'```json\s*(\{.*?\})\s*```', final_output, re.DOTALL)
-                if json_match:
-                    final_output = json.loads(json_match.group(1))
-                else:
-                    # Try to parse as JSON directly
-                    final_output = json.loads(final_output)
-            except json.JSONDecodeError:
-                # If parsing fails, return the raw output
-                pass
-        
-        # If we have a dict result, return it
-        if isinstance(final_output, dict):
-            return final_output
-        else:
-            # Return a generic success response
-            return {
-                "status": "success",
-                "content_with_images": content,
-                "images_inserted": [],
-                "images_skipped": [],
-                "message": "No contextual images were inserted"
-            }
-            
-    except Exception as e:
-        logger.error(f"Error in insert_contextual_images_tool: {e}", exc_info=True)
-        return {
-            "status": "error",
-            "error": f"Failed to insert contextual images: {str(e)}",
-            "content_with_images": content,
-            "images_inserted": [],
-            "images_skipped": []
-        }
-    
-
 
 @function_tool
 async def post_to_sanity_tool(
@@ -542,24 +479,72 @@ async def post_to_sanity_tool(
         )
 
         # --- Image Handling ---
-        local_image_path = image_path
-        temp_file = None
+        # Check if image_path is a URL from Freepik (no need to download)
         if image_path and image_path.startswith('http'):
-            clean_image_url = image_path.split('?', 1)[0]
-            response = requests.get(clean_image_url)
-            response.raise_for_status()
-            ext = os.path.splitext(clean_image_url)[-1] or '.jpg'
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                tmp.write(response.content)
-                local_image_path = tmp.name
-                temp_file = tmp.name
+            # Check if it's a Freepik URL - these can be used directly with Sanity
+            freepik_url = 'freepik' in image_path.lower()
+            pexel_url = 'pexels' in image_path.lower()
+            
+            if freepik_url or pexel_url:
+                # For Freepik or Pexel URLs, we can pass the URL directly to Sanity
+                logger.info(f"Detected {('Freepik' if freepik_url else 'Pexel')} URL, passing directly to Sanity: {image_path}")
+                local_image_path = image_path
+                temp_file = None
+            else:
+                # For other URLs (like HuggingFace temporary files), download to temporary file
+                normalized_image_path = image_path.replace('\\\\', '/').strip()
+                clean_image_url = normalized_image_path.split('?', 1)[0]
+                temp_file = None
+                try:
+                    response = requests.get(clean_image_url)
+                    response.raise_for_status()
+                    ext = os.path.splitext(clean_image_url)[-1] or '.jpg'
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                        tmp.write(response.content)
+                        local_image_path = tmp.name
+                        temp_file = tmp.name
+                except Exception as e:
+                    logger.error(f"Failed to download image from URL: {clean_image_url}. Error: {e}")
+                    return {
+                        "status": "error",
+                        "post_id": None,
+                        "image_id": None,
+                        "image_url": None,
+                        "image_source": "Download Failed",
+                        "image_alt_text": alt_text or f"{title} image",
+                        "error": f"Failed to download image from URL: {e}"
+                    }
+        else:
+            # For local file paths
+            if image_path:
+                normalized_image_path = os.path.normpath(image_path)
+            else:
+                normalized_image_path = None
+            
+            local_image_path = normalized_image_path
+            temp_file = None
+            
+            # Check if the file exists at the normalized path
+            if local_image_path and not os.path.exists(local_image_path):
+                logger.error(f"Image file not found at path: {local_image_path}")
+                return {
+                    "status": "error",
+                    "post_id": None,
+                    "image_id": None,
+                    "image_url": None,
+                    "image_source": "Local Error",
+                    "image_alt_text": alt_text or f"{title} image",
+                    "error": f"Image file not found at path: {local_image_path}"
+                }
+            elif local_image_path:
+                logger.info(f"Found image file at path: {local_image_path}")
 
         logger.info(f"Passing local_image_path to SanityAdapter: {local_image_path}")
-        logger.info(f"File exists at local_image_path: {os.path.exists(local_image_path)}")
-        if os.path.exists(local_image_path):
+        logger.info(f"File exists at local_image_path: {os.path.exists(local_image_path) if local_image_path else 'No image path provided'}")
+        if local_image_path and os.path.exists(local_image_path):
             logger.info(f"Size of file at local_image_path: {os.path.getsize(local_image_path)} bytes")
         else:
-            logger.error("File does not exist at local_image_path!")
+            logger.info("Using direct URL for image upload to Sanity")
 
         # Convert FAQItem objects or dictionaries to plain dictionaries for SanityAdapter
         faqs_list = []
@@ -588,27 +573,55 @@ async def post_to_sanity_tool(
         )
 
         # --- Cleanup ---
+        # Clean up temporary files created for downloading images
         if temp_file and os.path.exists(temp_file):
-            os.remove(temp_file)
+            try:
+                os.remove(temp_file)
+                logger.info(f"Successfully removed temporary file: {temp_file}")
+            except Exception as e:
+                logger.warning(f"Failed to remove temporary file {temp_file}: {e}")
 
         # --- Return Result ---
         if result["status"] == "success":
+            # Determine source based on image_path
+            if image_path and image_path.startswith('http'):
+                if 'freepik' in image_path.lower():
+                    image_source = "Freepik"
+                elif 'pexels' in image_path.lower():
+                    image_source = "Pexel"
+                else:
+                    image_source = "Downloaded"
+            else:
+                image_source = "Local"
+                
             return {
                 "status": "success",
                 "post_id": result["post_id"],
                 "image_id": result.get("image_id"),
                 "image_url": result.get("image_url"),
-                "image_source": "Downloaded" if image_path.startswith('http') else "Local",
+                "image_source": image_source,
                 "image_alt_text": alt_text or f"{title} image",
                 "notes": "Post created successfully in Sanity CMS."
             }
         else:
+            image_source = "None"
+            if image_path:
+                if image_path.startswith('http'):
+                    if 'freepik' in image_path.lower():
+                        image_source = "Freepik"
+                    elif 'pexels' in image_path.lower():
+                        image_source = "Pexel"
+                    else:
+                        image_source = "Download Failed"
+                else:
+                    image_source = "Local Error"
+                    
             return {
                 "status": "error",
                 "post_id": None,
                 "image_id": result.get("image_id"),
                 "image_url": result.get("image_url"),
-                "image_source": "None" if not image_path else ("Download Failed" if image_path.startswith('http') else "Local Error"),
+                "image_source": image_source,
                 "image_alt_text": alt_text or f"{title} image",
                 "error": f"Failed to post to Sanity: {result.get('error', 'Unknown error from adapter')}"
             }

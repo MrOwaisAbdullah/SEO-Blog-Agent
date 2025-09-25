@@ -65,15 +65,21 @@ def tavily_extract_tool(urls: List[str], include_images: bool = False) -> Union[
     """
     try:
         response = tavily_client.extract(urls=urls, include_images=include_images)
-        return [
-            {
-                "url": result["url"],
-                "title": result.get("title", ""),
-                "content": result["content"],
-                "images": result.get("images", []) if include_images else []
-            }
-            for result in response["results"]
-        ]
+        
+        # Check if response is a list (expected case)
+        if isinstance(response, list):
+            return [
+                {
+                    "url": result["url"],
+                    "title": result.get("title", ""),
+                    "content": result["content"],
+                    "images": result.get("images", []) if include_images else []
+                }
+                for result in response
+            ]
+        else:
+            # Handle case where response might be an error dictionary
+            return {"error": f"Unexpected response format: {response}", "results": []}
     except Exception as e:
         return {"error": str(e), "results": []}
 
