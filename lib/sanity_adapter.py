@@ -103,7 +103,7 @@ class SanityAdapter:
                         logger.error(f"Failed to fetch internal links after {max_retries} attempts.")
                         return []
 
-        # Validate relevance
+        # Validate relevance - but be less strict if we have results
         validated_links = []
         for post in results[:max_results]:
             title = post.get("title", "").lower()
@@ -742,7 +742,7 @@ class SanityAdapter:
                 logger.warning("Failed to resolve any category references.")
 
             # 7. Construct Document Object
-            full_url = f"https://blog-site-green-one.vercel.app/blog/{slug}"
+            full_url = f"https://owaisabdullah.dev/blog/{slug}"
 
             document = {
                 "_type": "post",

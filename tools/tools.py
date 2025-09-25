@@ -357,10 +357,10 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
             "aspect_ratio": "widescreen_16_9"
         }
         # Debug: Print the payload for troubleshooting
-        print(f"Freepik API Payload: {json.dumps(payload, indent=2)}")
+        logger.debug(f"Freepik API Payload: {json.dumps(payload, indent=2)}")
         response = requests.post(url, json=payload, headers=headers)
-        print(f"Freepik API Response Status: {response.status_code}")
-        print(f"Freepik API Response Text: {response.text}")
+        logger.debug(f"Freepik API Response Status: {response.status_code}")
+        logger.debug(f"Freepik API Response Text: {response.text}")
         response.raise_for_status()
         task_response = response.json()
         
@@ -406,12 +406,12 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
                         elif status == "FAILED":
                             return {"error": "Freepik image generation failed"}
                 except Exception as poll_error:
-                    print(f"Error polling Freepik API: {poll_error}")
+                    logger.error(f"Error polling Freepik API: {poll_error}")
                     continue
                 
         return {"error": "Freepik image generation timed out or invalid response"}
     except Exception as e:
-        print(f"Freepik failed: {str(e)}")
+        logger.error(f"Freepik failed: {str(e)}")
 
     # Try Hugging Face (fallback)
     try:
@@ -428,7 +428,7 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
             file_path = tmp.name
         return {"url": file_path, "alt_text": f"{keyword} illustration", "source": "Hugging Face"}
     except Exception as e:
-        print(f"Hugging Face failed: {str(e)}")
+        logger.error(f"Hugging Face failed: {str(e)}")
 
     return {"error": "All image generation services failed"}
 

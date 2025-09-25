@@ -201,10 +201,16 @@ class FallbackAgentRunner(AgentRunner):
         session = None
         last_error = None
 
-        while True:
+        # Add a maximum iteration limit to prevent infinite loops
+        max_iterations = 10  # Prevent infinite handoff loops
+        iteration_count = 0
+
+        while iteration_count < max_iterations:
+            iteration_count += 1
             print(f"[DEBUG] Entering fallback loop for agent: {getattr(current_agent, 'name', str(current_agent))}")
             print(f"[DEBUG] Current input: {current_input}")
             print(f"[DEBUG] Current session: {session}")
+            print(f"[DEBUG] Iteration count: {iteration_count}/{max_iterations}")
             
             # Sort models by performance (success rate) for this run
             sorted_models = self._sort_models_by_performance()
@@ -298,6 +304,11 @@ class FallbackAgentRunner(AgentRunner):
                     error_msg += f". Last error: {str(last_error)}"
                 print(f"[Fallback] {error_msg}")
                 raise Exception(error_msg)
+        
+        # If we've reached the maximum iterations, raise an error
+        error_msg = f"Maximum iterations ({max_iterations}) reached for agent {getattr(current_agent, 'name', str(current_agent))}. Possible infinite handoff loop detected."
+        print(f"[Fallback] {error_msg}")
+        raise Exception(error_msg)
 
     def _sort_models_by_performance(self):
         """Sort models by performance (success rate and response time)."""
