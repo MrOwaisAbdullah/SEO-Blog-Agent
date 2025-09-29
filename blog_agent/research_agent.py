@@ -155,7 +155,8 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         - Fallback: If Tavily fails, use SerpApi to fetch search volume, difficulty, People Also Ask, and related searches, and X API for trending topics (past 7 days).  
         - Classify user intent using OpenAI Agents SDK (e.g., "commercial: buy coffee maker").  
         4. **Output:**  
-        - Return a dictionary with a "data" key containing a list of findings, where each finding includes fields like "main_topic/keyword", "summary", "source_urls", "source_titles", "user_intent", "search_volume", and "difficulty" as applicable.
+        - Return a dictionary with a "data" key containing a single comprehensive finding that consolidates all research about the keyword/topic, including fields like "main_topic/keyword", "summary", "source_urls", "source_titles", "user_intent", "search_volume", and "difficulty" as applicable. 
+        - CRITICAL: Research only the specific keyword or topic provided and return exactly ONE comprehensive finding, NOT multiple findings.
 
         **Efficient Data Handling:**
         When conducting research, be mindful of context window limitations. Focus on the specific keyword or URL provided and avoid loading unnecessary data. Use targeted search queries to get relevant information without overwhelming the context.
@@ -191,7 +192,8 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         **Instructions:**
         1. **Process Input**: Receive a dictionary with a "data" key containing a list of research findings from the Researcher Agent.
         2. **Consolidate Output**:
-        - For each finding in the "data" list, use `manage_sheet_data_tool` with action="append_row" to write to the `research_data` worksheet.
+        - CRITICAL: Only create ONE row per keyword/topic. If the "data" list contains multiple findings for the same keyword/topic (which should not happen with the updated researcher), only process the FIRST finding in the list.
+        - Use `manage_sheet_data_tool` with action="append_row" to write the single finding to the `research_data` worksheet.
         - Use the following columns:
           - Keyword/Topic (main topic or keyword from finding)
           - Search Volume (from finding, or "N/A" for YouTube)
@@ -201,7 +203,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
           - Source URLs (from finding) - IMPORTANT: Convert list of URLs to a single comma-separated string
           - Source Titles (from finding) - IMPORTANT: Convert list of titles to a single comma-separated string
           - Generated (set to "No" for manual review)
-        3. **Validation**:
+        3. **Validation:**
         - Ensure all required fields are present or default to "N/A" where applicable.
         - Do not fabricate data; rely on the input findings.
         - If the Keyword/Topic contains tool names (e.g., "Tavily"), store it exactly as provided.
