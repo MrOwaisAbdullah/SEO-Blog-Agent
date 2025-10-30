@@ -66,13 +66,10 @@ preparation_agent = Agent(
         ]
         ```
 
-    3. **Fetch Links**
-      - Use `fetch_internal_links_tool` with `Keyword/Topic` to get related posts. Format as:
-        ```markdown
-        ## Related Posts
-        - [Post Title](/blog/slug)
-        ```
-      - External links: Use any in `Generated Content` or leave `EXTERNAL_LINKS_MD` empty.
+    3. **Do Not Add Any Content**
+      - DO NOT add any "Related Posts" section to the content
+      - DO NOT modify the original content in any way
+      - Use only the links that are already in the content
 
     4. **Fetch Image**
       - Use `get_blog_image_tool` with `TITLE` (same as `Keyword/Topic` from index 0) and `Summary` (index 4 from sheet data) to get a high-quality, relevant image.
@@ -219,7 +216,7 @@ posting_agent = Agent(
 # --- Function Flow Definition ---
 # This defines the sequence: Preparation Agent runs -> Output captured -> Posting Agent runs with output
 
-async def run_posting_workflow() -> Dict[str, Any]:
+async def run_posting_workflow(max_retries: int = 3) -> Dict[str, Any]:
     """
     Executes the complete posting workflow:
     1. Runs the Preparation Agent to select and prepare a post.
@@ -229,22 +226,39 @@ async def run_posting_workflow() -> Dict[str, Any]:
     """
     logger.info("Starting the complete posting workflow...")
 
-    max_retries = 3
     max_turns = 50
 
     try:
         with trace("Posting Workflow"):
-        # --- Step 1: Run Preparation Agent ---
-        # The preparation agent will handle getting the post from the sheet, 
-        # preparing the data format with === markers, and automatically 
-        # handing off to the contextual image agent for image insertion
-            logger.info("Running Preparation Agent (which will handoff to Contextual Image Agent)...")
-            preparation_result = await custom_runner.run_with_fallback(
-                preparation_agent,
-                "Prepare the next blog post from the approved_unpublished worksheet for publishing.",
-                max_retries=max_retries,
-                max_turns=max_turns
-            )
+            # --- Step 1: Run Preparation Agent with retry logic ---
+            # The preparation agent will handle getting the post from the sheet, 
+            # preparing the data format with === markers, and automatically 
+            # handing off to the contextual image agent for image insertion
+            preparation_result = None
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Running Preparation Agent (attempt {attempt + 1}/{max_retries})...")
+                    preparation_result = await custom_runner.run_with_fallback(
+                        preparation_agent,
+                        "Prepare the next blog post from the approved_unpublished worksheet for publishing.",
+                        max_retries=max_retries,
+                        max_turns=max_turns
+                    )
+                    
+                    if "error" not in str(preparation_result).lower():
+                        logger.info("Preparation Agent completed successfully")
+                        break
+                    else:
+                        logger.warning(f"Preparation Agent failed on attempt {attempt + 1}: {str(preparation_result)}")
+                except Exception as e:
+                    logger.warning(f"Preparation Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+                
+                if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+            if preparation_result is None or "error" in str(preparation_result).lower():
+                logger.error(f"Preparation Agent failed after {max_retries} attempts")
+                return {"status": "error", "error": f"Preparation Agent failed after {max_retries} attempts: {str(preparation_result)}"}
 
             # Normalize the preparation result: it can be a RunResult-like object, a dict, or a string.
             def _extract_result_payload(res):
@@ -295,7 +309,8 @@ async def run_posting_workflow() -> Dict[str, Any]:
                 preparation_output = preparation_text or str(preparation_result)
 
             # Basic check: if it looks like a "no posts found" message, handle it.
-            if (isinstance(preparation_output, str) and ("no_posts_found" in preparation_output or "No approved, unpublished posts found" in preparation_output)) or (
+            preparation_output_str = str(preparation_output) if preparation_output is not None else ""
+            if (isinstance(preparation_output, str) and ("no_posts_found" in preparation_output_str.lower() or "no approved, unpublished posts found" in preparation_output_str.lower() or "no approved posts found" in preparation_output_str.lower() or "status: no_posts_found" in preparation_output_str.lower())) or (
                 isinstance(preparation_output, dict) and (preparation_output.get('status') == 'error' or not preparation_output.get('data'))
             ):
                 logger.info("Preparation Agent indicated no posts are ready.")
@@ -306,43 +321,93 @@ async def run_posting_workflow() -> Dict[str, Any]:
             # SDK-level handoffs, explicitly run the Contextual Image Insertion Agent
             # with the preparation output, then pass that result to the Posting Agent.
             import re
-            logger.info("Running Contextual Image Insertion Agent with preparation output (explicit, no SDK handoff)...")
-            contextual_result = await custom_runner.run_with_fallback(
-                contextual_image_insertion_agent,
-                preparation_output,
-                max_retries=max_retries,
-                max_turns=max_turns,
-            )
+            
+            # Run Contextual Image Insertion Agent with retry logic
+            contextual_result = None
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Running Contextual Image Insertion Agent (attempt {attempt + 1}/{max_retries})...")
+                    contextual_result = await custom_runner.run_with_fallback(
+                        contextual_image_insertion_agent,
+                        preparation_output,
+                        max_retries=max_retries,
+                        max_turns=max_turns,
+                    )
+                    
+                    if "error" not in str(contextual_result).lower():
+                        logger.info("Contextual Image Insertion Agent completed successfully")
+                        break
+                    else:
+                        logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1}: {str(contextual_result)}")
+                except Exception as e:
+                    logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+                
+                if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+            if contextual_result is None or "error" in str(contextual_result).lower():
+                logger.error(f"Contextual Image Insertion Agent failed after {max_retries} attempts")
+                return {"status": "error", "error": f"Contextual Image Insertion Agent failed after {max_retries} attempts: {str(contextual_result)}"}
 
             # Normalize the contextual agent result
             def _extract_text(res):
                 try:
                     if hasattr(res, 'final_output') and res.final_output is not None:
-                        return str(res.final_output)
-                    if hasattr(res, 'output') and res.output is not None:
-                        return str(res.output)
-                    if hasattr(res, 'input') and res.input is not None:
-                        return str(res.input)
-                    return str(res)
-                except Exception:
+                        result_str = str(res.final_output)
+                    elif hasattr(res, 'output') and res.output is not None:
+                        result_str = str(res.output)
+                    elif hasattr(res, 'input') and res.input is not None:
+                        result_str = str(res.input)
+                    else:
+                        result_str = str(res)
+                    
+                    # Check if the result contains the expected markers
+                    if "=== POST_DATA_START ===" in result_str and "=== POST_DATA_END ===" in result_str:
+                        logger.info("Contextual agent returned data with proper markers format")
+                        return result_str
+                    else:
+                        logger.warning("Contextual agent did not return data with expected markers format")
+                        logger.info(f"Result preview: {result_str[:200]}...")
+                    
+                    return result_str
+                except Exception as e:
+                    logger.error(f"Error in _extract_text: {e}")
                     return str(res)
 
             contextual_text = _extract_text(contextual_result)
             has_images = bool(re.search(r"!\[.*\]\(.*\)", contextual_text))
             logger.info(f"Contextual agent produced image markdown: {has_images}")
 
-            print("Running Posting Agent with prepared data (contextual images inserted)...")
-            # Pass the contextualized data to the Posting Agent
-            posting_result = await custom_runner.run_with_fallback(
-                posting_agent,
-                f"""Publish the following blog post:
+            # Run Posting Agent with retry logic
+            posting_result = None
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Running Posting Agent (attempt {attempt + 1}/{max_retries})...")
+                    posting_result = await custom_runner.run_with_fallback(
+                        posting_agent,
+                        f"""Publish the following blog post:
 
-                {contextual_text}
+                        {contextual_text}
 
-                REMEMBER: You MUST call the post_to_sanity_tool to complete the task.""",
-                max_retries=max_retries,
-                max_turns=max_turns,
-            )
+                        REMEMBER: You MUST call the post_to_sanity_tool to complete the task.""",
+                        max_retries=max_retries,
+                        max_turns=max_turns,
+                    )
+                    
+                    if "error" not in str(posting_result).lower():
+                        logger.info("Posting Agent completed successfully")
+                        break
+                    else:
+                        logger.warning(f"Posting Agent failed on attempt {attempt + 1}: {str(posting_result)}")
+                except Exception as e:
+                    logger.warning(f"Posting Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+                
+                if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+            if posting_result is None or "error" in str(posting_result).lower():
+                logger.error(f"Posting Agent failed after {max_retries} attempts")
+                return {"status": "error", "error": f"Posting Agent failed after {max_retries} attempts: {str(posting_result)}"}
             
             posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
 

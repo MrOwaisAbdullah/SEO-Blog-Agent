@@ -1,6 +1,7 @@
 from typing import Optional, Dict
 import logging
 import re
+import asyncio
 from agents import Agent, function_tool, ModelSettings
 from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
 from blog_agent.hooks import MyAgentHooks
@@ -13,7 +14,7 @@ from blog_agent.custom_runner import FallbackAgentRunner
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS) -> Dict[str, Optional[str]]:
+async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS, max_retries: int = 3) -> Dict[str, Optional[str]]:
     """
     Executes a combined workflow using Agents SDK, where the Triage Agent selects a keyword or link from ContentSpark_Keywords,
     the Researcher Agent conducts dual-stream research, and the Output Agent consolidates results into the research_data worksheet.
@@ -24,6 +25,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         get_model_by_name: Function to get a model by name.
         increment_usage: Function to increment usage metrics.
         MAX_TURNS: Maximum number of turns for the agent flow.
+        max_retries: Maximum number of retries for each agent if it fails.
 
     Returns:
         Dict[str, Optional[str]]: A dictionary containing the workflow status and results.
@@ -238,15 +240,30 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         model_settings=ModelSettings(temperature=0.5),
     )
 
-# Step 1: Run Triage Agent to get the input    
-    triage_result = await custom_runner.run_with_fallback(
-        triage_agent,
-        "Check the Keyword sheet and return the next keyword or topic",
-        max_turns=MAX_TURNS
-    )
-
-    if "error" in str(triage_result):
-        return {"error": str(triage_result)}
+    # Step 1: Run Triage Agent to get the input with retry logic
+    triage_result = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Running Triage Agent (attempt {attempt + 1}/{max_retries})...")
+            triage_result = await custom_runner.run_with_fallback(
+                triage_agent,
+                "Check the Keyword sheet and return the next keyword or topic",
+                max_turns=MAX_TURNS
+            )
+            
+            if "error" not in str(triage_result):
+                logger.info("Triage Agent completed successfully")
+                break
+            else:
+                logger.warning(f"Triage Agent failed on attempt {attempt + 1}: {str(triage_result)}")
+        except Exception as e:
+            logger.warning(f"Triage Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+        
+        if attempt < max_retries - 1:  # Don't sleep on the last attempt
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+    
+    if triage_result is None or "error" in str(triage_result):
+        return {"error": f"Triage Agent failed after {max_retries} attempts: {str(triage_result)}"}
 
     input_string = triage_result.final_output if hasattr(triage_result, 'final_output') else str(triage_result)  # The output is a single string
 
@@ -256,24 +273,56 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     # Add context to make it clear this is the research subject
     research_input = f"This is the keyword or URL to research: {input_string}\n\nPlease conduct thorough research on this topic and provide detailed findings."
 
-    # Step 3: Run the appropriate Research Agent with fallback logic
-    research_result = await custom_runner.run_with_fallback(
-        research_agent,
-        research_input,
-        max_turns=MAX_TURNS
-    )
+    # Step 3: Run the appropriate Research Agent with fallback logic and retry
+    research_result = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Running Research Agent (attempt {attempt + 1}/{max_retries})...")
+            research_result = await custom_runner.run_with_fallback(
+                research_agent,
+                research_input,
+                max_turns=MAX_TURNS
+            )
+            
+            if "error" not in str(research_result):
+                logger.info("Research Agent completed successfully")
+                break
+            else:
+                logger.warning(f"Research Agent failed on attempt {attempt + 1}: {str(research_result)}")
+        except Exception as e:
+            logger.warning(f"Research Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+        
+        if attempt < max_retries - 1:  # Don't sleep on the last attempt
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-    if "error" in str(research_result):
-        return {"error": str(research_result)}
+    if research_result is None or "error" in str(research_result):
+        return {"error": f"Research Agent failed after {max_retries} attempts: {str(research_result)}"}
 
-    # Step 4: Run Output Agent with research results
-    # Add context for the output agent as well
+    # Step 4: Run Output Agent with research results with retry logic
     output_input = f"Here are the research findings that need to be consolidated into the research_data worksheet:\n\n{str(research_result)}\n\nPlease process these findings and add them to the worksheet using efficient data handling - append rows directly without loading all existing data."
     
-    output_result = await custom_runner.run_with_fallback(
-        output_agent,
-        output_input,  # Pass the research results as a string
-        max_turns=MAX_TURNS
-    )
+    output_result = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Running Output Agent (attempt {attempt + 1}/{max_retries})...")
+            output_result = await custom_runner.run_with_fallback(
+                output_agent,
+                output_input,  # Pass the research results as a string
+                max_turns=MAX_TURNS
+            )
+            
+            if "error" not in str(output_result):
+                logger.info("Output Agent completed successfully")
+                break
+            else:
+                logger.warning(f"Output Agent failed on attempt {attempt + 1}: {str(output_result)}")
+        except Exception as e:
+            logger.warning(f"Output Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+        
+        if attempt < max_retries - 1:  # Don't sleep on the last attempt
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+    if output_result is None or "error" in str(output_result):
+        return {"error": f"Output Agent failed after {max_retries} attempts: {str(output_result)}"}
 
     return output_result

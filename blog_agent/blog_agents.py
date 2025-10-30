@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from agents import Agent, ModelSettings, AgentHooks,RunContextWrapper, handoff, Tool
 from blog_agent.custom_runner import FallbackAgentRunner
 from tools.tools import get_stock_image_tool, post_to_sanity_tool, get_author_context_tool, textstat_tool, grammar_check_tool, fetch_internal_links_tool
@@ -6,6 +8,7 @@ from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
 from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
 from agents import enable_verbose_stdout_logging
 from blog_agent.hooks import MyAgentHooks
+from typing import Dict, Any
 
 # enable_verbose_stdout_logging()
 
@@ -183,18 +186,18 @@ content_generator_agent = Agent(
         - **Main Sections**: Use 4–6 H2 headings from Brief Content, expanding each into concise, informative content:  
         - Cover subtopics comprehensively to form a topic cluster (e.g., "Nespresso Features," "Budget Options").  
         - Use conversational language with a personal touch (e.g., "You know how frustrating it is when your coffee maker takes forever? Let me show you some better options.").  
-        - Keep paragraphs short - 2-3 sentences each for better readability.  
+        - Keep paragraphs very short - 2-3 sentences each maximum for better readability. Each paragraph should focus on a single idea or concept.  
         - Include 1–2 questions per section sourced via `tavily_search_tool` (query: "[Keyword/Topic] questions", max_results=5) or `tavily_extract_tool` from External Source Links:  
             - Example: "Why do some coffee makers brew faster?" (Direct answer: <50 words, e.g., "Fast-brew coffee makers use high-pressure systems."; followed by detailed explanation).  
         - Integrate secondary keywords naturally (2–3 uses each, e.g., "compact coffee maker").  
     - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., "Claim about brewing speed unverified").  
 
     4. **Writing and Style Requirements**:  
-    - **Style**: 
+    - **Style**:  
         - Use first person ("I") and personal pronouns ("you") for connection
         - Never use colons in headings (e.g., NOT "The Tangible Benefits: What Consistency Delivers" but "The Tangible Benefits of Consistency")  
         - Never use semicolons in headings or titles
-        - Create meaningful, full headings without colons or special formatting  
+        - Create meaningful, full headings without colons, semicolons, or special formatting - headings must clearly indicate the section content and provide value to the reader
         - Avoid AI-generated sounding phrases like "In today's digital landscape" or "Let's dive deeper into this topic"  
         - Write naturally as if a human expert is explaining the topic  
         - Never use em dashes (—) or other special punctuation that makes content look AI-generated  
@@ -202,7 +205,8 @@ content_generator_agent = Agent(
         - Check content against banned words list from `get_author_context_tool`  
         - Focus on providing value and answering user questions directly  
     - **Structure**:  
-        - Keep paragraphs concise with 2-3 sentences each
+        - Keep paragraphs very short with 2-3 sentences maximum - this is critical for readability
+        - Each paragraph should focus on a single idea or point
         - Use bullet points and numbered lists extensively for better readability and structure:
             - When presenting multiple benefits, features, or steps (use bulleted lists)
             - When providing sequential instructions or ranked items (use numbered lists)
@@ -213,6 +217,7 @@ content_generator_agent = Agent(
         - CRITICAL: Do not repeat the blog post title in the generated content column - start directly with the introduction H2
         - CRITICAL: The Generated Content column in the worksheet must NOT contain any H1 heading - only start with H2 and subsequent heading levels
         - Remove any placeholder text like "[50-100 words]" or "[100-150 words]" from the content
+        - NEVER add a "Related Posts" heading or section at the end of the content
     - **Optimization**:
         - Answer "People Also Ask" questions directly
         - Structure content to directly answer "People Also Ask" questions that appear in search results  
@@ -225,6 +230,7 @@ content_generator_agent = Agent(
         - Internal links: Use descriptive anchor text (e.g., "learn more about social media automation" not "click here")  
         - External links: Use descriptive anchor text (e.g., "according to industry research" not "source")  
         - Never use generic link text like "click here," "read more," or "link"
+        - Integrate links naturally within the content, not in a separate "Related Posts" section
 
     5. **Evaluate and Iterate:**  
     - Use `get_evaluation_feedback` to evaluate content:  
@@ -268,9 +274,10 @@ content_generator_agent = Agent(
     - Retry up to 3 times with 5-second delays; if it fails, include:  
         { "warnings": ["Failed to update Generated column in content_briefs after 3 attempts"] }  
 
-    8. **Persistence:**  
+    8. **Persistence and Fallbacks:**  
     - Retry all tools up to 3 times with 5-second delays.  
-    - Use fallbacks if Tavily fails.  
+    - Use fallbacks if Tavily tools fail.  
+    - If `get_evaluation_feedback` tool is unavailable or fails after retries, skip evaluation and proceed directly to save the generated content to the `generated_posts` worksheet and update the `Generated` column in `content_briefs` worksheet to "Yes".  
 
     **Tools:**  
     - `manage_sheet_data_tool`: Read from `content_briefs`, write to `generated_posts`, update `Generated` column.  
@@ -280,8 +287,7 @@ content_generator_agent = Agent(
     - `tavily_crawl_tool`: Deep content exploration (1 credit/5 URLs).  
     - `web_search_tool` (fallback): Web content for fact-checking.  
     - `get_evaluation_feedback`: Evaluate content quality (readability, relevance, SEO, user value).  
-    - `fetch_internal_links_tool`: Fetch internal links for natural integration.  
-
+    - `fetch_internal_links_tool`: Fetch internal links for natural integration (LIMITED TO 3 USES PER RUN - use strategically).
     **Output (JSON in Markdown):**  
 
     {
@@ -301,7 +307,7 @@ content_generator_agent = Agent(
     "warnings": []
     }
     """,
-    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements"), fetch_internal_links_tool],
+    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_internal_links_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements")],
     handoff_description="Use the given brief to create a high quality seo friendly Blog content, and use evaluation tools for feedback and improve the content using it.",
     hooks=MyAgentHooks(),
     model=custom_runner.get_model_by_name("gemini-2.5-flash"),

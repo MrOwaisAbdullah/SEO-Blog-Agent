@@ -33,7 +33,7 @@ class SanityAdapter:
         }
 
 
-    def fetch_internal_links(self, topic: str, max_results: int = 3, exclude_slug: str = None, max_retries: int = 3) -> List[Dict[str, str]]:
+    def fetch_internal_links(self, topic: str, max_results: int = 3, exclude_slug: str = None, max_retries: int = 2) -> List[Dict[str, str]]:
         """
         Fetches related posts from Sanity CMS for a given topic, extracting keywords from sentence-based topics to match against category titles.
         Args:
@@ -104,15 +104,21 @@ class SanityAdapter:
                         return []
 
         # Validate relevance - but be less strict if we have results
+        # Limit to max_results
+        results = results[:max_results]
         validated_links = []
-        for post in results[:max_results]:
+        for post in results:
             title = post.get("title", "").lower()
             slug = post.get("slug", "").lower()
             summary = post.get("summary", "")
-            if any(word in title or word in slug for word in topic_words):
-                validated_links.append({"title": post["title"], "slug": f"/blog/{post['slug']}", "summary": summary})
-            else:
-                logger.warning(f"Excluding irrelevant post: title='{post['title']}', slug='{post['slug']}'")
+            
+            # Check if the post is relevant to any of the topic keywords
+            is_relevant = any(word in title or word in slug for word in topic_words)
+            
+            # Include the post regardless of relevance (better to have some links than none)
+            validated_links.append({"title": post["title"], "slug": f"https://owaisabdullah.dev/blog/{post['slug']}", "summary": summary})
+            if not is_relevant:
+                logger.info(f"Including potentially less relevant post: title='{post['title']}', slug='{post['slug']}'")
         
         logger.info(f"Validated {len(validated_links)} internal links for topic '{topic}'.")
         return validated_links

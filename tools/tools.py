@@ -20,6 +20,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Global variable to track fetch_internal_links_tool usage
+fetch_internal_links_usage_count = 0
+MAX_INTERNAL_LINKS_CALLS = 3
+
 # Define Pydantic model for FAQ items
 class FAQItem(BaseModel):
     question: str = Field(..., description="The FAQ question")
@@ -343,11 +347,27 @@ def get_stock_image_tool(keyword: str):
 def generate_image_tool(keyword: str, custom_prompt: str = None):
     """Generates an image for a blog post using Freepik API (primary) and Hugging Face (fallback)."""
 
-    # Use custom prompt if provided, otherwise create a generic one
+    # Use custom prompt if provided, otherwise create a diverse, creative prompt
     if custom_prompt:
         prompt = custom_prompt
     else:
-        prompt = f"A professional, high-quality image for a blog post about {keyword}"
+        # Create diverse prompts to avoid repetitive blue/futuristic themes
+        prompt_templates = [
+            f"Vibrant, colorful digital painting illustrating concepts related to {keyword}, with dynamic composition and rich textures",
+            f"Warm, inviting photograph of {keyword} with natural lighting, professional quality, and engaging visual storytelling",
+            f"Bold graphic design representing {keyword} with striking contrasts, modern typography, and eye-catching layout",
+            f"Artistic watercolor illustration of {keyword} with organic textures, flowing colors, and expressive brushwork",
+            f"Dynamic action shot featuring {keyword} with dramatic angles, cinematic lighting, and high energy",
+            f"Clean minimalist composition about {keyword} with ample white space, elegant design, and sophisticated aesthetics",
+            f"Rich, saturated colors depicting {keyword} with dramatic lighting and emotional impact",
+            f"Hand-drawn sketch of {keyword} with expressive linework, artistic flair, and creative interpretation",
+            f"Retro-inspired design representing {keyword} with vintage color palette and nostalgic elements",
+            f"Abstract geometric composition illustrating {keyword} with modern elements and innovative design"
+        ]
+        # Randomly select a template to add variety
+        import random
+        prompt = random.choice(prompt_templates)
+        logger.info(f"Generated diverse prompt for '{keyword}': {prompt}")
 
     # Try Freepik (primary) - Using the correct Flux Dev API
     try:
@@ -650,6 +670,23 @@ async def fetch_internal_links_tool(topic: str, max_results: int = 3, exclude_sl
     Returns:
         dict: Result containing status, links, and message or error.
     """
+    global fetch_internal_links_usage_count
+    
+    # Increment usage counter
+    fetch_internal_links_usage_count += 1
+    
+    # Check if usage has exceeded the limit
+    if fetch_internal_links_usage_count > MAX_INTERNAL_LINKS_CALLS:
+        logger.warning(f"fetch_internal_links_tool usage exceeded limit of {MAX_INTERNAL_LINKS_CALLS}. Skipping call.")
+        return {
+            "status": "warning",
+            "links": [],
+            "message": f"Tool usage limit of {MAX_INTERNAL_LINKS_CALLS} exceeded. Skipping call.",
+            "warning": f"Tool usage limit of {MAX_INTERNAL_LINKS_CALLS} exceeded. Skipping call."
+        }
+    
+    logger.info(f"fetch_internal_links_tool called {fetch_internal_links_usage_count}/{MAX_INTERNAL_LINKS_CALLS} times")
+    
     try:
         adapter = SanityAdapter(
             project_id=os.environ['SANITY_PROJECT_ID'],

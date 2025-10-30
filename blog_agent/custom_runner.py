@@ -35,7 +35,7 @@ class FallbackAgentRunner(AgentRunner):
         # Gemini models share a single quota; other providers have their own
         self.LLM_MODELS = [
             {"name": "gemini-2.5-flash", "model": "gemini-2.5-flash", "provider": "gemini"},
-            {"name": "grok-4-fast-openrouter", "model": "x-ai/grok-4-fast:free", "provider": "openrouter"},
+            {"name": "qwen-2.5-openrouter", "model": "qwen/qwen2.5-vl-32b-instruct:free", "provider": "openrouter"},
             {"name": "gemini-2.5-flash-lite", "model": "gemini-2.5-flash-lite", "provider": "gemini"},
             {"name": "cohere", "model": "command-a-03-2025", "client": self.get_cohere_client, "provider": "cohere"},
             {"name": "gemini-2.0-flash", "model": "gemini-2.0-flash", "provider": "gemini"},

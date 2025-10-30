@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import re
+import asyncio
 from typing import Dict, Any, Optional, List
 from agents import Agent, ModelSettings, function_tool
 from tools.tools import get_stock_image_tool, generate_image_tool
@@ -93,7 +94,7 @@ image_quality_evaluation_agent = Agent(
     }
     ```
     """,
-    model=custom_runner.get_model_by_name("grok-4-fast-openrouter"),  # Using the specified model for advanced image analysis
+    model=custom_runner.get_model_by_name("qwen-2.5-openrouter"),  # Using the specified model for advanced image analysis
     model_settings=ModelSettings(temperature=0.3),  # Lower temperature for more consistent evaluations
 )
 
@@ -357,22 +358,38 @@ image_selection_agent = Agent(
     ## Prompt Creation Guidelines:
     - Extract 3-5 key concepts from the title and content
     - Create prompts that visualize these concepts, not generic terms
-    - Include style guidance (hyper-realistic, 3D render, futuristic, etc.)
+    - Include diverse style guidance to avoid repetitive blue/futuristic themes:
+      * "vibrant, colorful digital painting" 
+      * "warm, inviting photograph with natural lighting"
+      * "bold graphic design with striking contrasts"
+      * "artistic watercolor illustration with organic textures"
+      * "dynamic action shot with dramatic angles"
+      * "clean minimalist composition with ample white space"
+      * "rich, saturated colors with cinematic lighting"
+      * "hand-drawn sketch with expressive linework"
+      * "retro-inspired design with vintage color palette"
+      * "abstract geometric composition with modern elements"
     - Add specific visual elements that represent the topic
     - Avoid mentioning specific companies or people unless they're the main focus
     - Explicitly specify high-quality visual styles like:
-      * "hyper-realistic, game-quality render"
-      * "professional 3D visualization"
-      * "futuristic digital art"
-      * "clean, modern illustration"
+      * "vibrant, high-saturation photograph with dynamic composition"
+      * "expressive digital painting with rich textures and warm colors"
+      * "professional product photography with studio lighting"
+      * "artistic illustration with hand-drawn elements"
+      * "cinematic scene with dramatic lighting and color grading"
+      * "infographic-style visualization with clean lines"
+      * "mixed media collage with layered textures"
+      * "stylized 3D render with unique materials and lighting"
     - **Never include**: faces, people, humans, logos, brands, companies
-    - **Avoid**: Pixar-style, cartoonish, or character-based representations
+    - **Avoid**: Generic terms like "futuristic", "digital", "technology", "blue tones"
+    - **Encourage**: Unique color palettes, creative compositions, and artistic interpretations
+    - **Focus on**: Emotional impact, visual storytelling, and brand-appropriate aesthetics
     
     ## Example Good Prompts:
-    - "Hyper-realistic, game-quality render of AI analyzing data with futuristic interface elements"
-    - "Professional 3D visualization of brand consistency concept with unified visual elements"
-    - "Futuristic digital art of business strategy with workflow optimization visualization"
-    - "Clean, modern illustration of SEO optimization with search engine interface elements"
+    - "Vibrant, colorful digital painting illustrating AI analyzing data with dynamic interface elements and rich textures"
+    - "Warm, inviting photograph of brand consistency concept with natural lighting and professional quality"
+    - "Bold graphic design representing business strategy with striking contrasts and modern typography"
+    - "Artistic watercolor illustration of SEO optimization with organic textures and flowing colors"
     
     ## Example Bad Prompts:
     - "A generic image about social media" (too vague)
@@ -414,3 +431,95 @@ image_selection_agent = Agent(
     model=custom_runner.get_model_by_name("cohere"),
     model_settings=ModelSettings(temperature=0.7)
 )
+
+async def run_image_selection_workflow(input_data: Any, max_retries: int = 3) -> Dict[str, Any]:
+    """
+    Executes the image selection workflow:
+    1. Runs the Image Selection Agent to select or generate an image
+    2. Returns the final result.
+    """
+    logger.info("Starting the image selection workflow...")
+
+    max_turns = 50
+
+    try:
+        # Run Image Selection Agent with retry logic
+        image_result = None
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Running Image Selection Agent (attempt {attempt + 1}/{max_retries})...")
+                image_result = await custom_runner.run_with_fallback(
+                    image_selection_agent,
+                    input_data,
+                    max_retries=max_retries,
+                    max_turns=max_turns
+                )
+                
+                if "error" not in str(image_result).lower():
+                    logger.info("Image Selection Agent completed successfully")
+                    break
+                else:
+                    logger.warning(f"Image Selection Agent failed on attempt {attempt + 1}: {str(image_result)}")
+            except Exception as e:
+                logger.warning(f"Image Selection Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+            
+            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+        if image_result is None or "error" in str(image_result).lower():
+            logger.error(f"Image Selection Agent failed after {max_retries} attempts")
+            return {"status": "error", "error": f"Image Selection Agent failed after {max_retries} attempts: {str(image_result)}"}
+
+        logger.info("Image selection workflow completed.")
+        # Return the Image Selection Agent's output directly
+        return {"status": "completed", "data": image_result}
+
+    except Exception as e:
+        logger.error(f"Error in image selection workflow: {e}", exc_info=True)
+        return {"status": "error", "error": f"Unexpected error in workflow: {str(e)}"}
+
+async def run_contextual_image_insertion_workflow(input_data: Any, max_retries: int = 3) -> Dict[str, Any]:
+    """
+    Executes the contextual image insertion workflow:
+    1. Runs the Contextual Image Insertion Agent to insert images into content
+    2. Returns the final result.
+    """
+    logger.info("Starting the contextual image insertion workflow...")
+
+    max_turns = 50
+
+    try:
+        # Run Contextual Image Insertion Agent with retry logic
+        insertion_result = None
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Running Contextual Image Insertion Agent (attempt {attempt + 1}/{max_retries})...")
+                insertion_result = await custom_runner.run_with_fallback(
+                    contextual_image_insertion_agent,
+                    input_data,
+                    max_retries=max_retries,
+                    max_turns=max_turns
+                )
+                
+                if "error" not in str(insertion_result).lower():
+                    logger.info("Contextual Image Insertion Agent completed successfully")
+                    break
+                else:
+                    logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1}: {str(insertion_result)}")
+            except Exception as e:
+                logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+            
+            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+        if insertion_result is None or "error" in str(insertion_result).lower():
+            logger.error(f"Contextual Image Insertion Agent failed after {max_retries} attempts")
+            return {"status": "error", "error": f"Contextual Image Insertion Agent failed after {max_retries} attempts: {str(insertion_result)}"}
+
+        logger.info("Contextual image insertion workflow completed.")
+        # Return the Contextual Image Insertion Agent's output directly
+        return {"status": "completed", "data": insertion_result}
+
+    except Exception as e:
+        logger.error(f"Error in contextual image insertion workflow: {e}", exc_info=True)
+        return {"status": "error", "error": f"Unexpected error in workflow: {str(e)}"}
