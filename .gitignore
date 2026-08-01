@@ -169,5 +169,7 @@ logs/
 *.key
 secrets.json
 credentials.json
+google-credentials.json
 service-account-key.json
 contentspark-service-account-key.json
+.claude

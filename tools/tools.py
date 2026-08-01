@@ -464,7 +464,7 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
     return {"error": "All image generation services failed"}
 
 @function_tool
-async def post_to_sanity_tool(
+def post_to_sanity_tool(
     title: str,
     summary: str,
     content: str,
@@ -660,7 +660,7 @@ async def post_to_sanity_tool(
         }
 
 @function_tool
-async def fetch_internal_links_tool(topic: str, max_results: int = 3, exclude_slug: str = None):
+def fetch_internal_links_tool(topic: str, max_results: int = 3, exclude_slug: str = None):
     """
     Fetches related posts from Sanity CMS for a given topic to create internal links.
     Args:

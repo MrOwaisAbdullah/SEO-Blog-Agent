@@ -1,5 +1,5 @@
 import os
-from tavily import TavilyClient
+from tavily import AsyncTavilyClient
 from agents import function_tool
 from typing import List, Optional, Dict, Any, Union
 import requests
@@ -9,11 +9,13 @@ from bs4 import BeautifulSoup
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 if not TAVILY_API_KEY:
     raise ValueError("TAVILY_API_KEY environment variable not set.")
-tavily_client = TavilyClient(TAVILY_API_KEY)
+# Async client so Tavily calls don't block the event loop of the async
+# FastAPI/Agents SDK app they run inside.
+tavily_client = AsyncTavilyClient(TAVILY_API_KEY)
 
 # --- Tool Functions ---
 @function_tool
-def tavily_search_tool(query: str, max_results: int = 5, topic: str = "general", search_depth: str = "basic") -> Dict[str, Any]:
+async def tavily_search_tool(query: str, max_results: int = 5, topic: str = "general", search_depth: str = "basic") -> Dict[str, Any]:
     """
     Execute a Tavily search query and return structured results.
 
@@ -28,7 +30,7 @@ def tavily_search_tool(query: str, max_results: int = 5, topic: str = "general",
                         Returns a dict with an 'error' key if an exception occurs.
     """
     try:
-        response = tavily_client.search(
+        response = await tavily_client.search(
             query,
             max_results=max_results,
             topic=topic,
@@ -51,7 +53,7 @@ def tavily_search_tool(query: str, max_results: int = 5, topic: str = "general",
         return {"error": str(e), "results": [], "response_time": None}
 
 @function_tool
-def tavily_extract_tool(urls: List[str], include_images: bool = False) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+async def tavily_extract_tool(urls: List[str], include_images: bool = False) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Extract content from a list of URLs using Tavily Extract API.
 
@@ -64,8 +66,8 @@ def tavily_extract_tool(urls: List[str], include_images: bool = False) -> Union[
                                                      or a dict with an 'error' key if an exception occurs.
     """
     try:
-        response = tavily_client.extract(urls=urls, include_images=include_images)
-        
+        response = await tavily_client.extract(urls=urls, include_images=include_images)
+
         # Check if response is a list (expected case)
         if isinstance(response, list):
             return [
@@ -84,7 +86,7 @@ def tavily_extract_tool(urls: List[str], include_images: bool = False) -> Union[
         return {"error": str(e), "results": []}
 
 @function_tool
-def tavily_crawl_tool(start_url: str, max_depth: int = 2, limit: int = 10, instructions: Optional[str] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+async def tavily_crawl_tool(start_url: str, max_depth: int = 2, limit: int = 10, instructions: Optional[str] = None) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Crawl a website starting from a given URL using Tavily Crawl API.
 
@@ -99,7 +101,7 @@ def tavily_crawl_tool(start_url: str, max_depth: int = 2, limit: int = 10, instr
                                                      or a dict with an 'error' key if an exception occurs.
     """
     try:
-        response = tavily_client.crawl(
+        response = await tavily_client.crawl(
             url=start_url,
             max_depth=max_depth,
             limit=limit,

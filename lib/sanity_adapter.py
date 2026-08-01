@@ -32,6 +32,22 @@ class SanityAdapter:
             "Content-Type": "application/json"
         }
 
+    def _build_query_endpoint(self, query: str, params: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Builds a /data/query endpoint URL for the given GROQ query.
+
+        GROQ parameter values (topic keywords, slugs, doc ids, etc. — which
+        may originate from agent/LLM output) are passed as $-prefixed,
+        JSON-encoded URL parameters rather than interpolated into the query
+        text. Sanity's HTTP query API supports this natively and it's the
+        documented way to avoid GROQ injection from untrusted query values.
+        """
+        encoded_query = urllib.parse.quote(query, safe='')
+        endpoint = f"/data/query/{self.dataset}?query={encoded_query}"
+        for key, value in (params or {}).items():
+            encoded_value = urllib.parse.quote(json.dumps(value), safe='')
+            endpoint += f"&${key}={encoded_value}"
+        return endpoint
 
     def fetch_internal_links(self, topic: str, max_results: int = 3, exclude_slug: str = None, max_retries: int = 2) -> List[Dict[str, str]]:
         """
@@ -53,14 +69,18 @@ class SanityAdapter:
             topic_words = [topic.lower()]  # Fallback to full topic
         logger.info(f"Extracted keywords from topic '{topic}': {topic_words}")
 
-        # Build query for exact or partial match on category titles
-        query_conditions = ' || '.join([f'categories[]->title match "*{word}*"' for word in topic_words])
-        query = f'*[_type == "post" && ({query_conditions})][0...{max_results}]{{title, "slug": slug.current, summary}}'
+        # Build query for exact or partial match on category titles. Each
+        # keyword is passed as a named $param (see _build_query_endpoint)
+        # instead of being interpolated into the query text.
+        params: Dict[str, Any] = {f"word{i}": f"*{word}*" for i, word in enumerate(topic_words)}
+        query_conditions = ' || '.join([f'categories[]->title match $word{i}' for i in range(len(topic_words))])
+        query = f'*[_type == "post" && ({query_conditions})]'
         if exclude_slug:
-            query = f'*[_type == "post" && ({query_conditions}) && slug.current != "{exclude_slug}"][0...{max_results}]{{title, "slug": slug.current, summary}}'
+            query += ' && slug.current != $excludeSlug'
+            params["excludeSlug"] = exclude_slug
+        query += f'[0...{max_results}]{{title, "slug": slug.current, summary}}'
 
-        encoded_query = urllib.parse.quote(query, safe='')
-        endpoint = f"/data/query/{self.dataset}?query={encoded_query}"
+        endpoint = self._build_query_endpoint(query, params)
         attempt = 0
         results = []
 
@@ -81,11 +101,13 @@ class SanityAdapter:
         # Fallback: broader query using first keyword
         if not results:
             logger.info(f"No matches for keywords {topic_words}. Trying broader query.")
-            broad_query = f'*[_type == "post" && categories[]->title match "*{topic_words[0]}*"][0...{max_results}]{{title, "slug": slug.current, summary}}'
+            broad_params: Dict[str, Any] = {"word0": f"*{topic_words[0]}*"}
+            broad_query = '*[_type == "post" && categories[]->title match $word0'
             if exclude_slug:
-                broad_query = f'*[_type == "post" && categories[]->title match "*{topic_words[0]}*" && slug.current != "{exclude_slug}"][0...{max_results}]{{title, "slug": slug.current, summary}}'
-            encoded_broad_query = urllib.parse.quote(broad_query, safe='')
-            broad_endpoint = f"/data/query/{self.dataset}?query={encoded_broad_query}"
+                broad_query += ' && slug.current != $excludeSlug'
+                broad_params["excludeSlug"] = exclude_slug
+            broad_query += f'][0...{max_results}]{{title, "slug": slug.current, summary}}'
+            broad_endpoint = self._build_query_endpoint(broad_query, broad_params)
             attempt = 0
             while attempt < max_retries:
                 try:
@@ -150,12 +172,8 @@ class SanityAdapter:
         """
         Checks if a document exists, and creates it with default fields if it doesn't.
         """
-        # --- FIX 1: Correctly build URL with query parameters ---
-        query = f'*[_type == "{doc_type}" && _id == "{doc_id}"]'
-        # Encode the query parameter properly for the URL
-        encoded_query = urllib.parse.quote(query, safe='') 
-        query_url_with_params = f"/data/query/{self.dataset}?query={encoded_query}"
-        # --- END FIX 1 ---
+        query = '*[_type == $docType && _id == $docId]'
+        query_url_with_params = self._build_query_endpoint(query, {"docType": doc_type, "docId": doc_id})
 
         try:
             # Use the corrected URL
@@ -197,13 +215,10 @@ class SanityAdapter:
         from slugify import slugify # Ensure slugify is available
 
         # Build query for multiple slugs
-        slug_conditions = ' || '.join([f'slug.current == "{slugify(name)}"' for name in category_names])
+        slug_params: Dict[str, Any] = {f"slug{i}": slugify(name) for i, name in enumerate(category_names)}
+        slug_conditions = ' || '.join([f'slug.current == $slug{i}' for i in range(len(category_names))])
         query = f'*[_type == "category" && ({slug_conditions})][0...{len(category_names)}]{{_id, slug}}'
-        
-        # --- FIX 2: Correctly build URL with query parameters ---
-        encoded_query = urllib.parse.quote(query, safe='') 
-        query_url_with_params = f"/data/query/{self.dataset}?query={encoded_query}"
-        # --- END FIX 2 ---
+        query_url_with_params = self._build_query_endpoint(query, slug_params)
 
         try:
             # Use the corrected URL
@@ -267,9 +282,12 @@ class SanityAdapter:
         # Update the path to use the normalized version
         image_path = normalized_path
 
-        # Construct URL with filename (from working snippet)
+        # Construct URL with filename. Use the same dated API version as the
+        # rest of this adapter (self.base_url) instead of the old unversioned
+        # "v1" alias, so mutate/query/upload all target one consistent,
+        # documented API version.
         filename_encoded = urllib.parse.quote(os.path.basename(image_path))
-        upload_url = f"https://{self.project_id}.api.sanity.io/v1/assets/images/{self.dataset}?filename={filename_encoded}"
+        upload_url = f"{self.base_url}/assets/images/{self.dataset}?filename={filename_encoded}"
 
         # Guess MIME type (from working snippet)
         mime_type, _ = mimetypes.guess_type(image_path)

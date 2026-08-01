@@ -1,0 +1,62 @@
+name: Deploy Discord bot
+
+# Independent of pipeline.yml -- path-filtered so pushes to the pipeline code
+# (blog_agent/, tools/, lib/, scripts/) never trigger a bot redeploy, and vice
+# versa. Follows the same build -> GHCR -> Dokploy-webhook shape used for
+# other apps on this VPS, simplified: no frontend build-time args needed here.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'discord_bot/**'
+      - '.github/workflows/deploy-bot.yml'
+  workflow_dispatch: {}
+
+env:
+  # GHCR requires lowercase; github.repository_owner preserves case, so this
+  # must be hardcoded to your actual lowercase GitHub username/org.
+  IMAGE: ghcr.io/mrowaisabdullah/seo-blog-agent-discord-bot
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: discord_bot
+          push: true
+          # Must match the VPS CPU architecture (Intel/AMD Hetzner boxes are
+          # linux/amd64 -- using arm64 here would produce an image that can't
+          # run on the VPS).
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Dokploy deploy
+        run: |
+          curl -fsSL -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"applicationId":"${{ secrets.DOKPLOY_APP_ID }}"}'

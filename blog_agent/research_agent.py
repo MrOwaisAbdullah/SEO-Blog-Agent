@@ -73,7 +73,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     """,
         tools=[get_keyword_tool],
         hooks=MyAgentHooks(),
-        model=custom_runner.get_model_by_name("gemini-2.5-flash-lite"),
+        model=custom_runner.get_model_by_name("gemini-2.5-flash"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
@@ -120,7 +120,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         {RECOMMENDED_PROMPT_PREFIX}
 
         **Role and Objective:**  
-        You are the Researcher Agent, an SEO expert tasked with conducting dual-stream research based on the input provided (YouTube transcript if a URL is given, and keyword/topics analysis) to identify high-value, user-intent-driven content opportunities for blog posts, ensuring topical authority and AI citation potential.
+        You are the Researcher Agent, an SEO expert tasked with conducting dual-stream research based on the input provided (YouTube transcript text, or keyword/topics) to identify high-value, user-intent-driven content opportunities for blog posts, ensuring topical authority and AI citation potential.
 
         **Important Clarification for Keyword Research:**
         When conducting keyword research, you will receive a specific keyword or topic to research. The input will begin with "This is the keyword or URL to research:" followed by the actual keyword or URL. Even if the keyword contains the name of a tool or service you are also using (such as "Tavily"), you should treat the entire input as the research subject. For example, if you receive "This is the keyword or URL to research: Tavily - The Web Access Layer for AI Agents (Service Tool)", you should research this specific topic/service, not treat "Tavily" as a reference to the tool you are using.
@@ -133,14 +133,12 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
 
         **Instructions:**  
         1. **Chain-of-Thought Planning:**  
-        - Step 1: Extract the actual keyword or URL from the input (everything after "This is the keyword or URL to research:")
+        - Step 1: Extract the actual keyword or points from the input (everything after "This is the keyword or URL to research:")
         - Step 2: Identify the research goal (enhance content brief with YouTube insights if URL provided, or find high-value keywords).  
         - Step 3: Select tools (Tavily primary, SerpApi/X API fallbacks).  
         - Step 4: Analyze user intent for keywords (informational, navigational, transactional).  
         - Step 5: Consolidate findings for topical authority and AI citation.  
-        2. **YouTube Research Process (if URL provided):**  
-        - Fetch transcript via YouTube Data API v3 from the provided URL.  
-        - Extract key topics/points (e.g., "Nespresso features").  
+        2. **Extract key topics/points (e.g., "Nespresso features").**
         - Enhance with Tavily tools:  
             - Call `tavily_search_tool` with query `[topic]` (max_results=5, topic="general").  
             - For YouTube URLs in results, use `tavily_extract` for additional context (exclude images).  
@@ -157,7 +155,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         - Fallback: If Tavily fails, use SerpApi to fetch search volume, difficulty, People Also Ask, and related searches, and X API for trending topics (past 7 days).  
         - Classify user intent using OpenAI Agents SDK (e.g., "commercial: buy coffee maker").  
         4. **Output:**  
-        - Return a dictionary with a "data" key containing a single comprehensive finding that consolidates all research about the keyword/topic, including fields like "main_topic/keyword", "summary", "source_urls", "source_titles", "user_intent", "search_volume", and "difficulty" as applicable. 
+        - Return a dictionary with a "data" key containing a single comprehensive finding that consolidates all research about the keyword/topic, including fields like "main_topic/keyword", "researched content", "source_urls", "source_titles", "user_intent", "search_volume", and "difficulty" as applicable. 
         - CRITICAL: Research only the specific keyword or topic provided and return exactly ONE comprehensive finding, NOT multiple findings.
 
         **Efficient Data Handling:**
@@ -225,7 +223,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
             "1000",
             "0.5",
             "commercial",
-            "A brief summary of the content",
+            "A brief detailed summary of the content",
             "https://example.com, https://example2.com",  // Convert list to comma-separated string
             "Example Title, Another Title",  // Convert list to comma-separated string
             "No"

@@ -121,19 +121,17 @@ DEFAULT_MODEL=gemini-2.5-flash
    cd seo-blog-agent
    ```
 
-2. **Create virtual environment:**
+2. **Install dependencies (this project uses [uv](https://docs.astral.sh/uv/), not pip):**
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   uv sync
    ```
+   This creates and manages `.venv` automatically from `pyproject.toml`/`uv.lock` —
+   no separate manual venv step needed. Run project commands via `uv run ...`
+   (e.g. `uv run uvicorn main:app --reload`) or activate `.venv` directly.
 
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Create `.env` file:**
-   Copy the environment variables template above and fill in your actual values.
+3. **Create `.env` file:**
+   Copy `.env.example` to `.env` and fill in your actual values (see
+   `docs/service_setup.md` for where to get each credential).
 
 ## Setup Instructions
 
@@ -179,8 +177,12 @@ Obtain API keys for all the required services and add them to your `.env` file.
 
 1. **Start the API server:**
    ```bash
-   uvicorn main:app --reload
+   uv run uvicorn main:app --reload
    ```
+   Note: as of this repo's move to GitHub Actions + Discord for triggering
+   (see `docs/service_setup.md`), `main.py` is no longer the active way the
+   pipeline runs day-to-day — this is just for local testing of the
+   endpoints, which are still present in the code.
 
 2. **Test the health endpoint:**
    ```bash

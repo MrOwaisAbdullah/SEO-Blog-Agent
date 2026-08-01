@@ -22,9 +22,31 @@ REQUIRED_SCOPE = [
 CREDENTIALS_ENV_VAR = "GOOGLE_CREDENTIALS" # Ensure this matches your environment variable name
 SPREADSHEET_NAME = "ContentSpark" # Your main spreadsheet name
 
+# --- Cached client/spreadsheet handles ---
+# google-auth Credentials objects refresh their own tokens as needed, so it's
+# safe to keep reusing one authorized gspread client across calls instead of
+# re-authenticating (and re-resolving the spreadsheet by title, which costs an
+# extra Drive API lookup) on every single tool invocation. This matters
+# because Sheets API quota is limited to 300 requests/60s per project and
+# 60/60s per user.
+_gspread_client: Optional[gspread.Client] = None
+_spreadsheet_cache: Optional[gspread.Spreadsheet] = None
+
+
+def _reset_gspread_cache() -> None:
+    """Drops cached client/spreadsheet handles so the next call re-authenticates."""
+    global _gspread_client, _spreadsheet_cache
+    _gspread_client = None
+    _spreadsheet_cache = None
+
+
 # --- Helper Functions ---
 def get_gspread_client() -> gspread.Client:
-    """Authenticates and returns a gspread client."""
+    """Authenticates and returns a cached gspread client, reused across calls."""
+    global _gspread_client
+    if _gspread_client is not None:
+        return _gspread_client
+
     credentials_info = os.environ.get(CREDENTIALS_ENV_VAR)
     if not credentials_info:
         raise ValueError(f"Environment variable {CREDENTIALS_ENV_VAR} not set.")
@@ -32,9 +54,9 @@ def get_gspread_client() -> gspread.Client:
     try:
         creds_data = json.loads(credentials_info)
         creds = Credentials.from_service_account_info(creds_data, scopes=REQUIRED_SCOPE)
-        client = gspread.authorize(creds)
+        _gspread_client = gspread.authorize(creds)
         logger.info("Successfully authenticated with Google Sheets API.")
-        return client
+        return _gspread_client
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in {CREDENTIALS_ENV_VAR}: {e}")
         raise ValueError(f"Invalid JSON in {CREDENTIALS_ENV_VAR}") from e
@@ -43,15 +65,21 @@ def get_gspread_client() -> gspread.Client:
         raise
 
 
+def get_spreadsheet() -> gspread.Spreadsheet:
+    """Returns a cached handle to the main ContentSpark spreadsheet."""
+    global _spreadsheet_cache
+    if _spreadsheet_cache is not None:
+        return _spreadsheet_cache
+    client = get_gspread_client()
+    _spreadsheet_cache = client.open(SPREADSHEET_NAME)
+    return _spreadsheet_cache
+
+
 @function_tool
 def get_keyword_tool():
     """Fetches an available keyword from ContentSpark_Keywords and marks it as used."""
     try:
-        # Authenticate with Google Sheets
-        scope = REQUIRED_SCOPE
-        creds_info = os.environ.get(CREDENTIALS_ENV_VAR)
-        creds = Credentials.from_service_account_info(json.loads(creds_info), scopes=scope)
-        client = gspread.authorize(creds)
+        client = get_gspread_client()
         sheet = client.open("ContentSpark_Keywords").sheet1
 
         # Get all records
@@ -162,12 +190,10 @@ def manage_sheet_data(
     """
     A generic tool to manage data in a Google Sheet worksheet.
     """
-    client = None
     attempt = 0
     while attempt < retries:
         try:
-            client = get_gspread_client()
-            spreadsheet = client.open(SPREADSHEET_NAME)
+            spreadsheet = get_spreadsheet()
             # --- Key Change: Open the specific worksheet by name ---
             worksheet = spreadsheet.worksheet(worksheet_name)
             # -------------------------------------------------------
@@ -335,6 +361,9 @@ def manage_sheet_data(
             # Handle specific API errors, potentially retryable ones
             error_details = e.response.json() if hasattr(e, 'response') and e.response else str(e)
             logger.warning(f"API Error on attempt {attempt + 1} for {action}: {error_details}")
+            # Drop cached client/spreadsheet in case the error was caused by a
+            # stale/invalid cached handle, so the retry re-authenticates fresh.
+            _reset_gspread_cache()
             if attempt < retries - 1:
                  time.sleep(delay) # Use time.sleep
                  attempt += 1

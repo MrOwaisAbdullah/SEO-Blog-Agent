@@ -1,22 +1,38 @@
 from fastapi import FastAPI, HTTPException, Security, Depends, Body
 from fastapi.security import APIKeyHeader
+from contextlib import asynccontextmanager
 import os
-from blog_agent.blog_agents import content_generator_agent, brief_agent 
 from dotenv import load_dotenv
+
+# Load environment variables before anything below (agent/tool construction
+# at import time reads API keys from the environment).
+load_dotenv()
+
+from blog_agent.blog_agents import content_generator_agent, brief_agent
 from typing import Any, Dict, Optional, Union
 import asyncio
 from blog_agent.research_agent import combined_research_workflow
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.custom_runner import FallbackAgentRunner
 from agents.run import set_default_agent_runner
+from agents import set_tracing_disabled
 
-# Set up the custom runner as the default
 custom_runner = FallbackAgentRunner()
-set_default_agent_runner(custom_runner)
 
-load_dotenv()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # All inference goes through Gemini/OpenRouter/Cohere via custom clients,
+    # never OpenAI's API, so tracing export (which requires an OpenAI key and
+    # would send prompt/content data to OpenAI) is disabled.
+    set_tracing_disabled(True)
+    # Register the custom fallback runner as the default before any request
+    # can trigger an agent run.
+    set_default_agent_runner(custom_runner)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Define API key header
 API_KEY_NAME = "Authorization"
@@ -30,9 +46,8 @@ async def verify_api_key(api_key: str = Depends(api_key_header)):
     Verifies the API key provided in the Authorization header.
     Expected format: "Bearer <your_api_key>"
     """
-    # For local development, check against the known API key
-    EXPECTED_API_KEY = "abc123"
-        
+    if not EXPECTED_API_KEY:
+        raise HTTPException(status_code=500, detail="Server misconfiguration: API_KEY is not set")
     if not api_key:
         raise HTTPException(status_code=401, detail="Authorization header is missing")
     if not api_key.startswith("Bearer "):

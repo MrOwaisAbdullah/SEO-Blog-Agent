@@ -28,6 +28,9 @@ content_evaluation_agent = Agent(
     - External Source Links (comma-separated with titles)
     - Iteration Count (1 to 3)
 
+    **Title Guidance (Evaluation):**
+    - When evaluating the post, also evaluate the separately-provided title/H1: it should be curiosity-driven and hooky (encourages clicks in search results) but must never be clickbait. The title must preserve the primary keyword, set a clear and accurate expectation for the content, and the content must deliver on the promise set by the title. Flag titles that overpromise, are misleading, or do not match the content.
+
     **Instructions:**  
     1. **Chain-of-Thought Planning:**  
     - Step 1: Review the blog post, FAQs, Keyword/Topic, User Intent, and External Source Links.  
@@ -181,7 +184,8 @@ content_generator_agent = Agent(
 
     3. **Generate Blog Post:**  
     - Generate a 1500–2500-word blog post in Markdown format, aligned with user intent and author context:  
-        - **Title (H1)**: Include primary keyword, engaging and intent-driven. Create a compelling title that immediately captures interest and clearly indicates the value of the content. The title should work as a strong hook that makes readers want to continue reading. Important: This title will be used as the H1 heading for the page - do not include the title/H1 again in the generated content. The generated content should start directly with the introduction H2, not repeat the title as an H1.
+    - **Title (H1)**: Include the primary keyword and make the title engaging and intent-driven. Create a compelling, curiosity-driven title that captures interest without being clickbait—it should invite a click while accurately reflecting what the reader will get on the page. The title must set a clear, deliverable expectation and the generated content must fulfil that promise. Important: This title will be used as the H1 heading for the page - do not include the title/H1 again in the generated content. The generated content should start directly with the introduction H2, not repeat the title as an H1.
+    - **Summary (meta description)**: Also produce a short, SEO-friendly summary (50–160 characters) that includes the primary keyword, accurately summarizes the page, and can be used as the meta description in search results. This summary should be concise, compelling, and non-clickbait.
         - **Introduction H2**: 150–200 words, front-loading primary keyword, conversational tone. Start with a strong hook that grabs attention immediately - this could be a thought-provoking question, surprising statistic, relatable scenario, or bold statement. Address user intent clearly and set expectations for what the reader will learn.
         - **Main Sections**: Use 4–6 H2 headings from Brief Content, expanding each into concise, informative content:  
         - Cover subtopics comprehensively to form a topic cluster (e.g., "Nespresso Features," "Budget Options").  
@@ -246,11 +250,11 @@ content_generator_agent = Agent(
 
     6. **Save Generated Content:**  
     - Use `manage_sheet_data_tool` (action="append_row", worksheet_name="generated_posts") to save:  
-        - Title  (H1 heading with primary keyword, engaging and intent-driven, with no colons or semicolons)
-        - Generated Content (highest-scored Markdown string with integrated links) - IMPORTANT: This should be ONLY the content, NOT including the FAQs
-        - FAQs (JSON string) - IMPORTANT: This should be a separate JSON string containing the FAQs, not combined with the content
-        - Quality Score (integer in JSON response, but must be converted to string when calling `manage_sheet_data_tool`)  
-        - Summary ("Summary of the content of blog post in 2-4 sentences")  
+    - Title  (H1 heading with primary keyword, engaging and intent-driven, with no colons or semicolons)
+    - Generated Content (highest-scored Markdown string with integrated links) - IMPORTANT: This should be ONLY the content, NOT including the FAQs
+    - FAQs (JSON string) - IMPORTANT: This should be a separate JSON string containing the FAQs, not combined with the content
+    - Quality Score (integer in JSON response, but must be converted to string when calling `manage_sheet_data_tool`)
+    - Summary (SEO-friendly meta description, 50–160 characters, must include the primary keyword and accurately summarize the page)
         - Approve/Disapprove ("Approved")  
         - Published ("No")  
     - The generated_posts worksheet has the following columns in order: Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published
@@ -328,13 +332,14 @@ brief_agent = Agent(
        - Call `get_author_context_tool` to get tone, emojis, banned_words
        - If unavailable, use default: "professional, approachable, no jargon"
     
-    3. Create content brief with these sections to be saved in the Brief Content column:
-       - H1 title with primary keyword
-       - 100-150 word intro with keyword, addressing user intent
-       - 4-6 H2 headings with 50-100 word descriptions
-       - Each section should include 1-2 conversational questions
-       - Suggest natural link placements throughout (format as [Link Text](URL) for later integration)
-       - Follow writing guidelines: no colons in headings, short paragraphs, natural tone
+     3. Create content brief with these sections to be saved in the Brief Content column:
+     - H1 title with primary keyword (curiosity-driven and hooky but not clickbait; must set an accurate, deliverable expectation that the brief enables the writer to fulfil)
+         - 100-150 word intro with keyword, addressing user intent
+         - 4-6 H2 headings with 50-100 word descriptions
+         - Short summary/meta description (50-160 characters, SEO-friendly) to be used as the page meta description
+         - Each section should include 1-2 conversational questions
+         - Suggest natural link placements throughout (format as [Link Text](URL) for later integration)
+         - Follow writing guidelines: no colons in headings, short paragraphs, natural tone
     
     4. Generate 5-7 FAQs in JSON format:
        - Use `tavily_search_tool` with query "People Also Ask [Keyword/Topic]" or `tavily_extract_tool` on source URLs
@@ -349,7 +354,7 @@ brief_agent = Agent(
        - Brief Content (Markdown with H1, introduction, H2 headings, link suggestions)
        - FAQs (JSON string)
        - External Source Links (comma-separated URLs with titles)
-       - Content Summary (retained from research_data row)
+    - Content Summary (retained from research_data row) — must be a 50–160 character SEO-friendly meta description
        - Generated ("No")
     
     7. Update the original row in `research_data` by setting Generated to "Yes"

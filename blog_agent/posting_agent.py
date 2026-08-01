@@ -56,6 +56,7 @@ preparation_agent = Agent(
     2. **Extract Data**
       - Extract: `Keyword/Topic`, `Generated Content`, `FAQs`, `Approve/Disapprove`, `Published`.
       - Parse `FAQs` as JSON or Markdown (e.g., `* **Q: ...** **A:** ...`). Convert to JSON `[{"question": "...", "answer": "..."}]`.
+            - Extract (include Summary/meta): `Keyword/Topic`, `Generated Content`, `FAQs`, `Summary`, `Approve/Disapprove`, `Published`. The `Summary` field must be a 50–160 character SEO-friendly meta description (if present in the sheet).
       - If `FAQs` is missing or empty, use a default:
         ```json
         [
@@ -72,7 +73,7 @@ preparation_agent = Agent(
       - Use only the links that are already in the content
 
     4. **Fetch Image**
-      - Use `get_blog_image_tool` with `TITLE` (same as `Keyword/Topic` from index 0) and `Summary` (index 4 from sheet data) to get a high-quality, relevant image.
+    - Use `get_blog_image_tool` with `TITLE` (same as `Keyword/Topic` from index 0) and `Summary` (index 4 from sheet data). Note: `Summary` should be a 50–160 character SEO-friendly meta description; use it when available to guide image selection.
       - This tool will generate an AI image first, evaluate its quality, and use stock photos as fallback.
       - **IMPORTANT**: The tool returns a JSON response. You MUST extract the `image_url` field from this JSON response.
       - Example JSON response format:
@@ -89,7 +90,7 @@ preparation_agent = Agent(
 
     5. **Derive Fields**
       - `TITLE`: Use `Keyword/Topic` or derive a title.
-      - `SUMMARY`: Take the first sentence of `Generated Content` or derive from `Keyword/Topic`.
+    - `SUMMARY`: Ensure there is a 50–160 character SEO-friendly meta description. If the sheet includes a valid `Summary` (50–160 chars, contains primary keyword), use it. Otherwise, derive a concise meta description (50–160 chars) that includes the primary keyword, accurately summarizes the page, and is suitable for search result snippets.
       - `SLUG`: Create a URL-friendly slug from `Keyword/Topic` (e.g., `brand-consistency-in-social-media`).
       - `CATEGORIES`: Derive from `Keyword/Topic` (e.g., `["Social Media", "Branding"]`).
       - `CONTENT_WITH_LINKS`: Use `Generated Content`.
@@ -176,15 +177,16 @@ posting_agent = Agent(
     ## CRITICAL STEPS:
     1. FIND the data between === markers
     2. PARSE each field (TITLE, SUMMARY, CONTENT_WITH_LINKS, etc.)
-    3. IMMEDIATELY call `post_to_sanity_tool` with these values:
-       - title: the extracted TITLE
-       - summary: the extracted SUMMARY
-       - content: the extracted CONTENT_WITH_LINKS (preserve all markdown formatting for proper rendering)
-       - categories: the extracted CATEGORIES (as a JSON list)
-       - image_path: the extracted IMAGE_URL
-       - slug: the extracted SLUG
-       - alt_text: the extracted ALT_TEXT
-       - faqs: the extracted FAQS (as a JSON list)
+     3. Validate SUMMARY and IMMEDIATELY call `post_to_sanity_tool` with these values:
+         - Before posting: ensure `SUMMARY` is SEO-friendly and between 50 and 160 characters and includes the primary keyword. If the extracted `SUMMARY` does not meet these constraints, generate or trim a concise meta description that fits (50–160 chars) and accurately summarizes the page.
+         - title: the extracted TITLE
+         - summary: the validated or generated SUMMARY
+         - content: the extracted CONTENT_WITH_LINKS (preserve all markdown formatting for proper rendering)
+         - categories: the extracted CATEGORIES (as a JSON list)
+         - image_path: the extracted IMAGE_URL
+         - slug: the extracted SLUG
+         - alt_text: the extracted ALT_TEXT
+         - faqs: the extracted FAQS (as a JSON list)
     4. After successful posting, update the Google Sheet:
        - Find the row in "generated_posts" worksheet using SOURCE_KEYWORD_TOPIC to match "Title" column
        - Update the "Published" column for that row to "Yes"
