@@ -37,8 +37,8 @@ class FallbackAgentRunner(AgentRunner):
         # models by performance over time.
         self.LLM_MODELS = [
             # {"name": "minimax-m2", "model": "MiniMax-M2", "client": self.get_minimax_client, "provider": "minimax"},
-            {"name": "gemini-2.5-flash", "model": "gemini-2.5-flash", "provider": "gemini"},
-            {"name": "gemini-2.5-flash-lite", "model": "gemini-2.5-flash-lite", "provider": "gemini"},
+            {"name": "gemini-flash-latest", "model": "gemini-flash-latest", "provider": "gemini"},
+            {"name": "gemini-flash-lite-latest", "model": "gemini-flash-lite-latest", "provider": "gemini"},
             {"name": "cohere", "model": "command-a-03-2025", "client": self.get_cohere_client, "provider": "cohere"},
             # openrouter/free is OpenRouter's own auto-router: it always
             # resolves to whatever free model is currently available instead
@@ -49,14 +49,34 @@ class FallbackAgentRunner(AgentRunner):
             {"name": "openrouter-free", "model": "openrouter/free", "provider": "openrouter"},
         ]
 
+        # Paid, last-resort-only models. Deliberately kept out of LLM_MODELS
+        # and never passed through _sort_models_by_performance(): that sort
+        # rewards reliability, and a paid API will typically look *more*
+        # reliable than the free tiers above it, which would eventually
+        # promote it ahead of the free options it's meant to be a fallback
+        # for. run_with_fallback appends this list after the sorted free
+        # pool on every attempt instead, so it's only ever tried once
+        # everything above it has failed or is unavailable -- regardless of
+        # how well it happens to be performing.
+        # deepseek-v4-flash is text-only (no vision) -- fine here since no
+        # top-level agent run through run_with_fallback needs vision; the
+        # one agent that does (image_quality_evaluation_agent) is only ever
+        # invoked as a tool, so its own fixed model is never swapped by the
+        # fallback runner.
+        self.LAST_RESORT_MODELS = [
+            {"name": "deepseek-v4-flash", "model": "deepseek/deepseek-v4-flash", "provider": "openrouter-paid"},
+        ]
+
         # Quota tracking at provider level
-        self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0,
+        self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, "openrouter-paid": 0,
         # "minimax": 0
         }
         # Approximate daily limits. openrouter's free tier is 50/day without
         # ever having purchased credits (1000/day only applies once you've
         # bought $10+ in credits at some point, which isn't "free" anymore).
-        self.model_limits = {"gemini": 50, "openrouter": 50, "cohere": 33, "minimax": 500}
+        # openrouter-paid has no real daily cap (it's pay-per-token, not
+        # quota-limited) -- the number below is just a sanity ceiling.
+        self.model_limits = {"gemini": 50, "openrouter": 50, "cohere": 33, "openrouter-paid": 1000, "minimax": 500}
         self.last_reset = datetime.now()
 
         # Provider performance tracking
@@ -64,11 +84,12 @@ class FallbackAgentRunner(AgentRunner):
             "gemini": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
             "openrouter": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
             "cohere": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "openrouter-paid": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
             # "minimax": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0}
         }
 
         # Temporary provider unavailability tracking
-        self.provider_unavailable_until = {"gemini": None, "openrouter": None, "cohere": None, "minimax": None}
+        self.provider_unavailable_until = {"gemini": None, "openrouter": None, "cohere": None, "openrouter-paid": None, "minimax": None}
 
     def get_gemini_client(self):
         from agents import AsyncOpenAI
@@ -117,7 +138,7 @@ class FallbackAgentRunner(AgentRunner):
                 else:
                     if model_config["provider"] == "gemini":
                         client = self.get_gemini_client()
-                    elif model_config["provider"] == "openrouter":
+                    elif model_config["provider"] in ("openrouter", "openrouter-paid"):
                         client = self.get_openrouter_client()
                     elif model_config["provider"] == "cohere":
                         client = self.get_cohere_client()
@@ -125,14 +146,26 @@ class FallbackAgentRunner(AgentRunner):
                     #     client = self.get_minimax_client()
                     else:
                         raise ValueError(f"Unknown provider: {model_config['provider']}")
-                
+
                 return OpenAIChatCompletionsModel(
                     model=model_config["model"],
                     openai_client=client
                 )
-        
+
+        # Last-resort models are deliberately excluded from LLM_MODELS (see
+        # comment where LAST_RESORT_MODELS is defined) but still need to
+        # resolve here, since run_with_fallback looks them up by name too.
+        for model_config in self.LAST_RESORT_MODELS:
+            if model_config["name"] == model_name:
+                client = self.get_openrouter_client()
+                print(f"Creating model: {model_name} -> {model_config['model']} (last resort)")
+                return OpenAIChatCompletionsModel(
+                    model=model_config["model"],
+                    openai_client=client
+                )
+
         # If not found, raise error instead of defaulting
-        available_models = [m["name"] for m in self.LLM_MODELS]
+        available_models = [m["name"] for m in self.LLM_MODELS + self.LAST_RESORT_MODELS]
         raise ValueError(f"Model name '{model_name}' not found in LLM_MODELS. Available models: {available_models}")
 
     async def is_model_available(self, provider_name):
@@ -140,7 +173,7 @@ class FallbackAgentRunner(AgentRunner):
         # Reset usage daily
         if (datetime.now() - self.last_reset).days >= 1:
             print(f"Resetting daily usage counters for all providers")
-            self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, 
+            self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, "openrouter-paid": 0,
             # "minimax": 0
             }
             self.last_reset = datetime.now()
@@ -251,7 +284,10 @@ class FallbackAgentRunner(AgentRunner):
         last_error = None
 
         for attempt in range(max_retries):
-            sorted_models = self._sort_models_by_performance()
+            # LAST_RESORT_MODELS is appended after sorting, never sorted
+            # itself, so it's always tried last regardless of how well it
+            # happens to be performing (see comment on LAST_RESORT_MODELS).
+            sorted_models = self._sort_models_by_performance() + self.LAST_RESORT_MODELS
 
             for model_config in sorted_models:
                 try:

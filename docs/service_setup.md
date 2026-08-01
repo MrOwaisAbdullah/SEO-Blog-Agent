@@ -128,12 +128,35 @@ these on quota/error — you need all three for the fallback to actually mean
 anything:
 
 - **Gemini** — `GEMINI_API_KEY` from [Google AI Studio](https://aistudio.google.com/).
-- **OpenRouter** — `OPENROUTER_API_KEY` from [openrouter.ai](https://openrouter.ai/) (also used for the image-quality-evaluation agent's vision model).
+  Uses the `-latest` model aliases (`gemini-flash-latest`,
+  `gemini-flash-lite-latest`), not dated snapshots like `gemini-2.5-flash` —
+  those started 404ing with "no longer available to new users" for some
+  projects (an active, unresolved Google-side inconsistency, confirmed via
+  their own developer forum, not an intentional deprecation). The `-latest`
+  aliases always resolve to whatever Google currently recommends, so this
+  class of surprise shouldn't recur for the Gemini provider specifically.
+  `.github/workflows/check-models.yml` exists to re-verify this at any time.
 - **Cohere** — `COHERE_API_KEY` from [dashboard.cohere.com](https://dashboard.cohere.com/).
+  Note: Cohere's free trial key is explicitly barred from production/
+  commercial use by their own terms — worth a deliberate decision before
+  relying on it for an unattended, real content pipeline.
+- **OpenRouter** — `OPENROUTER_API_KEY` from [openrouter.ai](https://openrouter.ai/).
+  Used two ways: `openrouter/free` (an auto-router that always resolves to
+  whatever's currently free, immune to any single free model being delisted)
+  as a regular fallback tier, and `deepseek/deepseek-v4-flash` as a **paid,
+  genuinely-last-resort** tier — only tried once every free option above it
+  has failed or is unavailable, regardless of how reliable it turns out to
+  be (see the comment on `LAST_RESORT_MODELS` in `custom_runner.py`). Needs
+  a funded OpenRouter balance to actually work; the free tier above doesn't.
+  DeepSeek V4 Flash is text-only (no vision) — fine, since no agent that
+  goes through the fallback rotation needs vision (the one that does,
+  `image_quality_evaluation_agent`, is only ever invoked as a tool with its
+  own fixed Gemini model, never swapped by the fallback runner).
 
 Daily quota assumptions baked into `custom_runner.py`'s `model_limits`: Gemini
-50, Cohere 33, OpenRouter 1000 — these are approximate free-tier limits and
-worth checking against your actual plan.
+50, Cohere 33, OpenRouter (free tier) 50 — these are approximate free-tier
+limits and worth checking against your actual plan. The paid DeepSeek tier
+has no real daily cap (pay-per-token, not quota-limited).
 
 ## 4. Research/search
 

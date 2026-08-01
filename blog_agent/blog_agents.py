@@ -143,7 +143,7 @@ content_evaluation_agent = Agent(
     # gemini-2.0-flash was retired by Google (March 3, 2026). Flash-Lite is
     # the appropriate, still-current, cheapest fit for a scoring/evaluation
     # task (lighter than full content generation).
-    model=custom_runner.get_model_by_name("gemini-2.5-flash-lite"),
+    model=custom_runner.get_model_by_name("gemini-flash-lite-latest"),
     hooks=MyAgentHooks(),
     model_settings=ModelSettings(temperature=0.4),
 )
@@ -317,7 +317,7 @@ content_generator_agent = Agent(
     tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_internal_links_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements")],
     handoff_description="Use the given brief to create a high quality seo friendly Blog content, and use evaluation tools for feedback and improve the content using it.",
     hooks=MyAgentHooks(),
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.7),
 )
 
@@ -366,6 +366,6 @@ brief_agent = Agent(
     """,
     tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, manage_sheet_data_tool, get_author_context_tool],
     hooks=MyAgentHooks(),
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.8),
 )

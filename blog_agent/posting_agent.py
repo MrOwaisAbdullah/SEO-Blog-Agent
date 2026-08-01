@@ -144,7 +144,7 @@ preparation_agent = Agent(
     """,
     tools=[manage_sheet_data_tool, fetch_internal_links_tool, image_selection_agent.as_tool(tool_name="get_blog_image_tool", tool_description="Selects or generates a relevant image for blog posts")],
     hooks=MyAgentHooks(),
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.5),
 )
 
@@ -211,7 +211,7 @@ posting_agent = Agent(
     """,
     tools=[post_to_sanity_tool, manage_sheet_data_tool],
     hooks=MyAgentHooks(),
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
 )
 
 

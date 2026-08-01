@@ -99,7 +99,7 @@ image_quality_evaluation_agent = Agent(
     # exists at all. Gemini 2.5 Flash is multimodal (vision-capable), already
     # free on this project's tier, and already configured elsewhere in this
     # codebase, so it's a zero-new-cost, zero-new-dependency replacement.
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.3),  # Lower temperature for more consistent evaluations
 )
 
@@ -309,7 +309,7 @@ contextual_image_insertion_agent = Agent(
         get_stock_image_tool,
         image_quality_evaluation_agent.as_tool(tool_name="evaluate_image_quality", tool_description="Evaluates image quality and relevance for contextual placement")
     ],
-    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.7),
 )
 

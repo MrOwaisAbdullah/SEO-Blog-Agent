@@ -73,7 +73,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     """,
         tools=[get_keyword_tool],
         hooks=MyAgentHooks(),
-        model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+        model=custom_runner.get_model_by_name("gemini-flash-latest"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
@@ -170,7 +170,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         """,
         tools=[web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title],
         hooks=MyAgentHooks(),
-        model=custom_runner.get_model_by_name("gemini-2.5-flash"),
+        model=custom_runner.get_model_by_name("gemini-flash-latest"),
         model_settings=ModelSettings(temperature=0.5),
     )
 
