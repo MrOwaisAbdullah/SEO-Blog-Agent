@@ -81,6 +81,24 @@ def _parse_agent_json(output: str):
     return parsed if isinstance(parsed, dict) else None
 
 
+def _normalize_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+def _get_field(d: dict, name: str, default=""):
+    """The prompt examples show exact key casing/spacing (e.g.
+    "Keyword/Topic", "Brief Content"), but fallback models don't reliably
+    match it -- confirmed live: Cohere returned "keyword/topic" and
+    "brief_content" for the same fields in one run, then the properly-cased
+    keys in another. Match keys after stripping case and non-alphanumeric
+    characters instead of requiring an exact string match."""
+    target = _normalize_key(name)
+    for key, value in d.items():
+        if _normalize_key(key) == target:
+            return value
+    return default
+
+
 def _agent_output_indicates_error(output: str) -> bool:
     """Every brief/content agent is instructed to return JSON with an
     explicit "status" field, always including an "errors": [] key even on
@@ -93,7 +111,7 @@ def _agent_output_indicates_error(output: str) -> bool:
     parsed = _parse_agent_json(output)
     if parsed is None:
         return True
-    return parsed.get("status") == "error"
+    return _get_field(parsed, "status") == "error"
 
 
 # Discord's hard cap is 2000 chars per message; leave headroom for the
@@ -218,9 +236,9 @@ def _ensure_brief_persisted(brief: dict) -> None:
     deterministically if not, so a stage can't report success without
     actually persisting its output -- the same class of fix already applied
     to the posting chain's marker round-tripping."""
-    keyword = str(brief.get("Keyword/Topic", "")).strip()
+    keyword = str(_get_field(brief, "Keyword/Topic")).strip()
     if not keyword:
-        raise RuntimeError("Brief output missing Keyword/Topic; cannot persist or verify.")
+        raise RuntimeError(f"Brief output missing Keyword/Topic; cannot persist or verify. Keys seen: {list(brief.keys())}")
 
     existing = manage_sheet_data(worksheet_name="content_briefs", action="get_all_records")
     already_saved = existing.get("status") == "success" and any(
@@ -230,17 +248,17 @@ def _ensure_brief_persisted(brief: dict) -> None:
     if already_saved:
         print(f"[brief] content_briefs already has a row for '{keyword}'; agent saved it correctly.")
     else:
-        faqs = brief.get("FAQs", [])
+        faqs = _get_field(brief, "FAQs", [])
         faqs_str = faqs if isinstance(faqs, str) else json.dumps(faqs)
         append_result = manage_sheet_data(
             worksheet_name="content_briefs",
             action="append_row",
             row_values=[
                 keyword,
-                str(brief.get("Brief Content", "")),
+                str(_get_field(brief, "Brief Content")),
                 faqs_str,
-                str(brief.get("External Source Links", "")),
-                str(brief.get("Content Summary", "")),
+                str(_get_field(brief, "External Source Links")),
+                str(_get_field(brief, "Content Summary")),
                 "No",
             ],
         )
@@ -306,9 +324,9 @@ def _ensure_content_persisted(content: dict) -> dict:
     instead of blindly trusting "last row = the one just generated", which
     would silently notify about a stale row if the agent hadn't actually
     saved anything."""
-    title = str(content.get("Title", "")).strip()
+    title = str(_get_field(content, "Title")).strip()
     if not title:
-        raise RuntimeError("Content output missing Title; cannot persist or verify.")
+        raise RuntimeError(f"Content output missing Title; cannot persist or verify. Keys seen: {list(content.keys())}")
 
     existing = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
     existing_row = None
@@ -321,16 +339,16 @@ def _ensure_content_persisted(content: dict) -> dict:
         print(f"[content] generated_posts already has a row for '{title}'; agent saved it correctly.")
         return existing_row
 
-    faqs = content.get("FAQs", [])
+    faqs = _get_field(content, "FAQs", [])
     faqs_str = faqs if isinstance(faqs, str) else json.dumps(faqs)
     row_values = {
         "Title": title,
-        "Generated Content": str(content.get("Generated Content", "")),
+        "Generated Content": str(_get_field(content, "Generated Content")),
         "FAQs": faqs_str,
-        "Quality Score": str(content.get("Quality Score", "")),
-        "Summary": str(content.get("Summary", "")),
-        "Approve/Disapprove": str(content.get("Approve/Disapprove", "Approved")),
-        "Published": str(content.get("Published", "No")),
+        "Quality Score": str(_get_field(content, "Quality Score")),
+        "Summary": str(_get_field(content, "Summary")),
+        "Approve/Disapprove": str(_get_field(content, "Approve/Disapprove", "Approved")),
+        "Published": str(_get_field(content, "Published", "No")),
     }
     append_result = manage_sheet_data(
         worksheet_name="generated_posts",
