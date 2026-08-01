@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+from typing import Optional
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
 # the script's own directory on sys.path[0], not the repo root -- so sibling
@@ -319,6 +320,66 @@ async def run_brief() -> None:
     _ensure_brief_persisted(parsed)
 
 
+_H1_RE = re.compile(r"^#\s+(.+?)\s*\n", re.MULTILINE)
+_FAQ_HEADING_RE = re.compile(r"^##\s*FAQs?\s*$", re.MULTILINE | re.IGNORECASE)
+_HEADING_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
+_FAQ_PAIR_RE = re.compile(r"\*\*(.+?)\*\*\s*\n(.+?)(?=\n\*\*|\Z)", re.DOTALL)
+
+
+def _extract_content_from_markdown(output: str) -> Optional[dict]:
+    """Salvage a full blog post when a fallback model skips the required
+    JSON envelope entirely and just returns raw Markdown -- confirmed live:
+    Cohere did exactly this for the Content Generator Agent, returning a
+    complete, well-researched post as plain text instead of the documented
+    JSON structure. Discarding it and forcing a full regeneration would
+    waste more of an already-scarce fallback-provider quota on a post that
+    was already correctly written. Only called after _parse_agent_json has
+    already failed; output that isn't actually a real post (too short, no
+    title) still falls through to a genuine failure."""
+    text = output.strip()
+    if not text.startswith("#"):
+        return None
+
+    h1_match = _H1_RE.match(text)
+    title = h1_match.group(1).strip() if h1_match else ""
+    body = text[h1_match.end():] if h1_match else text
+
+    faqs = []
+    faq_heading_match = _FAQ_HEADING_RE.search(body)
+    if faq_heading_match:
+        section_start = faq_heading_match.end()
+        next_heading_match = _HEADING_RE.search(body, section_start)
+        section_end = next_heading_match.start() if next_heading_match else len(body)
+        for question, answer in _FAQ_PAIR_RE.findall(body[section_start:section_end]):
+            question = question.strip().strip("*").strip()
+            answer = " ".join(answer.strip().splitlines()).strip()
+            if question and answer:
+                faqs.append({"question": question, "answer": answer})
+        body = body[:faq_heading_match.start()] + body[section_end:]
+
+    body = body.strip()
+    if not title or len(body) < 200:
+        return None
+
+    # No separate meta description in this shape -- derive a plausible one
+    # from the opening paragraph rather than leaving it empty.
+    plain_intro = re.sub(r"^##\s+.+$", "", body, count=1, flags=re.MULTILINE)
+    plain_intro = re.sub(r"[#*_`\[\]()]", "", plain_intro).strip()
+    plain_intro = re.sub(r"\s+", " ", plain_intro)
+    summary = plain_intro[:160].rsplit(" ", 1)[0] if len(plain_intro) > 160 else plain_intro
+
+    return {
+        "status": "success",
+        "Title": title,
+        "Generated Content": body,
+        "FAQs": faqs,
+        "Summary": summary,
+        "Quality Score": "",
+        "Approve/Disapprove": "Approved",
+        "Published": "No",
+    }
+
+
 def _ensure_content_persisted(content: dict) -> dict:
     """Same fix as _ensure_brief_persisted, for the Content Generator Agent
     -> generated_posts. Returns the persisted row (existing or freshly
@@ -371,15 +432,23 @@ async def run_content() -> None:
     )
     output = str(getattr(result, "final_output", result))
     print(f"[content] result: {output}")
-    if _agent_output_indicates_error(output) and not _is_benign_empty(output):
-        raise RuntimeError(f"Content stage failed: {output}")
 
     if _is_benign_empty(output):
         return
 
     parsed = _parse_agent_json(output)
-    if not parsed:
-        raise RuntimeError(f"Content stage reported success but produced unparseable output: {output[:300]}")
+    if parsed is not None:
+        if _get_field(parsed, "status") == "error":
+            raise RuntimeError(f"Content stage failed: {output}")
+    else:
+        # Not JSON at all -- try to salvage a raw Markdown post before
+        # treating this as a genuine failure. Confirmed live: Cohere
+        # sometimes skips the documented JSON envelope entirely and just
+        # returns the finished post as plain text.
+        parsed = _extract_content_from_markdown(output)
+        if parsed is None:
+            raise RuntimeError(f"Content stage failed: {output}")
+        print("[content] Agent returned raw Markdown instead of the JSON envelope; salvaged it instead of discarding a completed post.")
 
     persisted_row = _ensure_content_persisted(parsed)
     _notify_discord(
