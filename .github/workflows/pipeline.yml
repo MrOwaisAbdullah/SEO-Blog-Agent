@@ -64,6 +64,8 @@ jobs:
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           FREEPIC_API_KEY: ${{ secrets.FREEPIC_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SANITY_PROJECT_ID: ${{ secrets.SANITY_PROJECT_ID }}
           SANITY_DATASET: ${{ secrets.SANITY_DATASET }}

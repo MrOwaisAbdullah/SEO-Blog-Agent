@@ -459,3 +459,46 @@ actual operating surface instead of just a notifier.
    continues — instead of failing the entire publish over a cosmetic
    image-placement step. The Posting Agent now always receives a
    Python-built block, removing that hop as a failure point entirely.
+
+## Added: Cloudflare Workers AI as a free image-generation fallback
+
+Freepik's 401 (item 7 above) exposed a real gap: the only fallback after AI
+image generation failed was stock photos, meaning a bad/expired Freepik key
+silently turned off AI-generated hero images entirely. Added Cloudflare
+Workers AI (`generate_image_tool` in `tools/tools.py`, new
+`_generate_image_cloudflare` helper) as a middle tier between Freepik and
+Pexels — genuinely free (10,000 Neurons/day, no credit card, resets daily at
+00:00 UTC), not a trial credit like Freepik.
+
+Model choice (`@cf/black-forest-labs/flux-2-dev`, i.e. FLUX.2 [dev]) was
+picked from Cloudflare's ~45-model catalog using live LM Arena / Artificial
+Analysis Text-to-Image leaderboard data rather than reading model
+descriptions at face value — this mattered because **Cloudflare's own model
+catalog mixes free and non-free models in the same list with no visual
+distinction beyond a small "Cloudflare-hosted" vs "Third-party" tag.**
+Models like `gpt-image-2`, `nano-banana-2`, `seedream-4.5`, `flux-2-pro`,
+and `flux-2-max` all appear in the same catalog page as the free FLUX/Leonardo
+models, but are proxied to their original providers — the free Neuron pool
+does not apply to them at all, confirmed against Cloudflare's own docs (a
+model's `source` field is `hosted` vs `proxied`, and free tier only covers
+`hosted`). Restricting the leaderboard comparison to the "Cloudflare-hosted"
+subset only, FLUX.2 [dev] ranked clearly highest (Artificial Analysis has it
+around #8 overall, ELO ~1149-1244 depending on source/date) against the
+cheaper FLUX.2 [klein] 4B/9B tiers and legacy FLUX.1 [schnell] also
+available for free on this account.
+
+Implementation notes:
+- FLUX.2 [dev] requires `multipart/form-data` even for a text-only prompt —
+  a documented quirk of this specific model family on Workers AI, unlike
+  `flux-1-schnell` which takes plain JSON.
+- Requests set `width=1280, height=720` for a 16:9 landscape framing,
+  matching the aspect ratio Freepik was already generating
+  (`widescreen_16_9`) so featured images stay visually consistent regardless
+  of which tier actually generated them.
+- Response is a base64-encoded image (`result.image`), decoded and written
+  to a temp PNG file — `post_to_sanity_tool` already handles arbitrary local
+  file paths generically, so no changes were needed there.
+- New env vars are optional: `generate_image_tool` skips straight past this
+  tier (falls to Pexels) if `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN`
+  aren't set, same graceful-degradation pattern as everything else in this
+  fallback chain.

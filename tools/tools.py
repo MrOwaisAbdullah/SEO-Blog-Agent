@@ -1,5 +1,6 @@
 from agents import function_tool
 import os
+import base64
 import requests
 import json
 from slugify import slugify
@@ -369,11 +370,72 @@ def get_stock_image_tool(keyword: str):
         logger.error(f"Failed to fetch stock image from Pexels: {e}")
         return {"error": f"Failed to fetch stock image from Pexels: {str(e)}"}
 
+# Model choice backed by live leaderboard data (LM Arena / Artificial
+# Analysis Text-to-Image leaderboards), not marketing copy: FLUX.2 [dev]
+# ranks #8 overall on Artificial Analysis's leaderboard (ELO in the
+# 1149-1244 range depending on source/date) -- clearly ahead of the cheaper
+# FLUX.2 [klein] 4B/9B (ELO ~1030-1120) and legacy FLUX.1 [schnell] also
+# available on Workers AI's free tier. It costs more Neurons per image than
+# the klein tiers, but this only runs as a fallback (after Freepik fails)
+# for at most a handful of images/day, so the free 10,000 Neuron/day pool
+# comfortably covers it.
+CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev"
+
+
+def _generate_image_cloudflare(prompt: str, keyword: str) -> Optional[Dict[str, Any]]:
+    """Free image-generation fallback via Cloudflare Workers AI (10,000 free
+    Neurons/day, no credit card) -- used when Freepik fails (e.g. an
+    invalid/expired key) instead of degrading straight to a stock photo."""
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not account_id or not api_token:
+        logger.info("CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN not set; skipping Cloudflare Workers AI image fallback.")
+        return None
+    try:
+        url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+        headers = {"Authorization": f"Bearer {api_token}"}
+        # FLUX.2 [dev] requires multipart/form-data even for a text-only
+        # prompt (a documented quirk of this model family on Workers AI).
+        # (None, value) tuples send plain form fields without attaching a file.
+        files = {
+            "prompt": (None, prompt),
+            "width": (None, "1280"),  # 16:9 landscape, matching the Freepik "widescreen_16_9" framing this replaces
+            "height": (None, "720"),
+            "steps": (None, "20"),
+        }
+        response = requests.post(url, headers=headers, files=files, timeout=90)
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("success"):
+            logger.error(f"Cloudflare Workers AI image generation failed: {payload.get('errors')}")
+            return None
+        image_b64 = (payload.get("result") or {}).get("image")
+        if not image_b64:
+            logger.error("Cloudflare Workers AI response missing image data")
+            return None
+        image_bytes = base64.b64decode(image_b64)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            tmp.write(image_bytes)
+            local_path = tmp.name
+        logger.info(f"Successfully generated image via Cloudflare Workers AI ({CLOUDFLARE_IMAGE_MODEL}): {local_path}")
+        return {
+            "image_url": local_path,
+            "alt_text": f"{keyword} illustration",
+            "source": "Cloudflare Workers AI (FLUX.2 dev)",
+            "evaluation_score": 8.5,
+            "feedback": "Generated via Cloudflare Workers AI FLUX.2 [dev] (free-tier fallback, used because Freepik was unavailable)",
+        }
+    except Exception as e:
+        logger.error(f"Cloudflare Workers AI image generation failed: {e}")
+        return None
+
+
 @function_tool
 def generate_image_tool(keyword: str, custom_prompt: str = None):
-    """Generates an image for a blog post using the Freepik API. On failure, returns
-    an error dict -- the calling agent (image_selection_agent) is instructed to fall
-    back to get_stock_image_tool rather than this function retrying internally."""
+    """Generates an image for a blog post using the Freepik API (primary) or
+    Cloudflare Workers AI (free fallback). On failure, returns an error dict --
+    the calling agent (image_selection_agent) is instructed to fall back to
+    get_stock_image_tool rather than this function retrying internally."""
 
     # Use custom prompt if provided, otherwise create a diverse, creative prompt
     if custom_prompt:
@@ -450,14 +512,25 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
                             # Return in format expected by image_selection_agent
                             return {"image_url": image_url, "alt_text": f"{keyword} illustration", "source": "Freepik", "evaluation_score": 9.0, "feedback": "High quality image from Freepik"}
                         elif status == "FAILED":
-                            return {"error": "Freepik image generation failed"}
+                            logger.error("Freepik image generation failed (task status FAILED)")
+                            break
                 except Exception as poll_error:
                     logger.error(f"Error polling Freepik API: {poll_error}")
                     continue
-                
-        return {"error": "Freepik image generation timed out or invalid response"}
+        else:
+            logger.error("Freepik image generation timed out or returned an invalid response")
     except Exception as e:
         logger.error(f"Freepik failed: {str(e)}")
+
+    # Freepik failed (auth error, quota, timeout, etc.) -- fall back to
+    # Cloudflare Workers AI's FLUX.1 [schnell] model, which has a genuine
+    # free tier (10,000 Neurons/day, no credit card) and no per-key
+    # credential fragility of its own. Only kicks in if the Cloudflare env
+    # vars are actually configured; otherwise the caller's own instructions
+    # (image_selection_agent) fall back to get_stock_image_tool instead.
+    cloudflare_result = _generate_image_cloudflare(prompt, keyword)
+    if cloudflare_result:
+        return cloudflare_result
 
     return {"error": "All image generation services failed"}
 
