@@ -295,6 +295,8 @@ def _ensure_brief_persisted(brief: dict) -> None:
     )
     if update_result.get("status") != "success":
         print(f"[brief] Warning: failed to mark research_data row {lookup['row_index']} as Generated=Yes: {update_result}")
+    else:
+        print(f"[brief] Marked research_data row {lookup['row_index']} as Generated=Yes for '{keyword}'.")
 
 
 async def run_brief() -> None:
