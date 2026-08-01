@@ -1,0 +1,58 @@
+name: Check model availability
+
+# Manual diagnostic: hits each LLM this pipeline uses directly (bypassing
+# agents/sheets entirely) with a trivial prompt and reports which models are
+# actually available on the configured API keys. Added after gemini-2.5-flash
+# unexpectedly 404'd with "no longer available to new users" during a real
+# pipeline run -- this exists so that kind of surprise is a 30-second manual
+# check instead of a live pipeline failure discovered after the fact.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Gemini models
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          for model in gemini-2.5-flash gemini-2.5-flash-lite; do
+            echo "=== $model ==="
+            code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+              "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" \
+              -H "Authorization: Bearer $GEMINI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"model\": \"$model\", \"messages\": [{\"role\": \"user\", \"content\": \"reply with just OK\"}]}")
+            echo "HTTP $code"
+            cat /tmp/resp.json
+            echo
+          done
+
+      - name: Check Cohere
+        env:
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+        run: |
+          echo "=== command-a-03-2025 ==="
+          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            "https://api.cohere.ai/compatibility/v1/chat/completions" \
+            -H "Authorization: Bearer $COHERE_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model": "command-a-03-2025", "messages": [{"role": "user", "content": "reply with just OK"}]}')
+          echo "HTTP $code"
+          cat /tmp/resp.json
+          echo
+
+      - name: Check OpenRouter
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          echo "=== openrouter/free ==="
+          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            "https://openrouter.ai/api/v1/chat/completions" \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model": "openrouter/free", "messages": [{"role": "user", "content": "reply with just OK"}]}')
+          echo "HTTP $code"
+          cat /tmp/resp.json
+          echo
