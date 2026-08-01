@@ -19,6 +19,12 @@ import asyncio
 import os
 import sys
 
+# When Python runs a script by path (`python scripts/run_stage.py`), it puts
+# the script's own directory on sys.path[0], not the repo root -- so sibling
+# top-level packages (blog_agent, tools, lib) aren't importable otherwise.
+# This must happen before any project imports below.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dotenv import load_dotenv
 
 load_dotenv()
