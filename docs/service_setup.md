@@ -25,13 +25,12 @@ Hugging Face Spaces secrets.
 | `API_KEY` | This app's own FastAPI auth | Required |
 | `GOOGLE_CREDENTIALS` | Google Sheets (pipeline's database) | Required |
 | `GEMINI_API_KEY` | Gemini (primary LLM) | Required |
-| `OPENROUTER_API_KEY` | OpenRouter (LLM fallback + image QA model) | Required |
+| `OPENROUTER_API_KEY` | OpenRouter (LLM fallback, via `openrouter/free` auto-router) | Required |
 | `COHERE_API_KEY` | Cohere (LLM fallback) | Required |
 | `TAVILY_API_KEY` | Tavily (research search/extract/crawl) | Required |
 | `SERPAPI_KEY` | SerpAPI (search fallback) | Required |
-| `PEXELS_API_KEY` | Pexels (stock image fallback) | Required |
+| `PEXELS_API_KEY` | Pexels (image fallback) | Required |
 | `FREEPIC_API_KEY` | Freepik (primary AI image generation) | Required |
-| `HF_TOKEN` | Hugging Face (image generation fallback) | Required |
 | `SANITY_PROJECT_ID` | Sanity CMS | Required |
 | `SANITY_DATASET` | Sanity CMS (e.g. `production`) | Required |
 | `SANITY_API_TOKEN` | Sanity CMS (needs write access) | Required |
@@ -145,16 +144,20 @@ worth checking against your actual plan.
 
 ## 5. Images
 
-Three-tier fallback in `generate_image_tool`/`get_stock_image_tool`:
+Two-tier fallback in `generate_image_tool`/`get_stock_image_tool`:
 
 1. **Freepik** (`FREEPIC_API_KEY` — note the key name has no "k", it's not a
    typo in this doc) — primary AI image generation, from
-   [freepik.com/api](https://www.freepik.com/api).
-2. **Hugging Face** (`HF_TOKEN`) — fallback AI generation
-   (`black-forest-labs/FLUX.1-dev` via Inference API), from
-   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
-3. **Pexels** (`PEXELS_API_KEY`) — stock photo fallback if AI generation fails
-   entirely, from [pexels.com/api](https://www.pexels.com/api/).
+   [freepik.com/api](https://www.freepik.com/api). Note: new accounts get a
+   one-time 5 EUR trial credit, not an ongoing free tier — budget for this
+   once that's spent.
+2. **Pexels** (`PEXELS_API_KEY`) — stock photo fallback if AI generation
+   fails, from [pexels.com/api](https://www.pexels.com/api/). Genuinely free
+   and generous (200 req/hr, 20K/month).
+
+Hugging Face was removed as a fallback here (previously `HF_TOKEN` +
+`black-forest-labs/FLUX.1-dev`) — its free Inference API tier was cut down to
+a small monthly credit allowance in 2026 and had become unreliable.
 
 ## 6. Sanity CMS
 
@@ -190,7 +193,7 @@ Repo → Settings → Secrets and variables → Actions → New repository secre
 Add every "Required" row from the [Quick reference](#quick-reference) table
 above (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `COHERE_API_KEY`,
 `TAVILY_API_KEY`, `SERPAPI_KEY`, `PEXELS_API_KEY`, `FREEPIC_API_KEY`,
-`HF_TOKEN`, `SANITY_*`, `GOOGLE_CREDENTIALS`), plus one new one:
+`SANITY_*`, `GOOGLE_CREDENTIALS`), plus one new one:
 `DISCORD_WEBHOOK_URL` (from step 3 below).
 
 ### 2. Create the Discord application + bot

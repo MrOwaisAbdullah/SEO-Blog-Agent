@@ -38,18 +38,25 @@ class FallbackAgentRunner(AgentRunner):
         self.LLM_MODELS = [
             # {"name": "minimax-m2", "model": "MiniMax-M2", "client": self.get_minimax_client, "provider": "minimax"},
             {"name": "gemini-2.5-flash", "model": "gemini-2.5-flash", "provider": "gemini"},
-            {"name": "qwen-2.5-openrouter", "model": "qwen/qwen2.5-vl-32b-instruct:free", "provider": "openrouter"},
             {"name": "gemini-2.5-flash-lite", "model": "gemini-2.5-flash-lite", "provider": "gemini"},
             {"name": "cohere", "model": "command-a-03-2025", "client": self.get_cohere_client, "provider": "cohere"},
-            {"name": "gemini-2.0-flash", "model": "gemini-2.0-flash", "provider": "gemini"},
+            # openrouter/free is OpenRouter's own auto-router: it always
+            # resolves to whatever free model is currently available instead
+            # of a hardcoded :free model ID. OpenRouter's free catalog churns
+            # fast (one tracker recorded a third of it delisted in 9 days) --
+            # this was added specifically to replace a hardcoded qwen model
+            # that got fully removed from OpenRouter, breaking every call.
+            {"name": "openrouter-free", "model": "openrouter/free", "provider": "openrouter"},
         ]
-        
+
         # Quota tracking at provider level
-        self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, 
+        self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0,
         # "minimax": 0
         }
-        # Approximate daily limits
-        self.model_limits = {"gemini": 50, "openrouter": 1000, "cohere": 33, "minimax": 500}
+        # Approximate daily limits. openrouter's free tier is 50/day without
+        # ever having purchased credits (1000/day only applies once you've
+        # bought $10+ in credits at some point, which isn't "free" anymore).
+        self.model_limits = {"gemini": 50, "openrouter": 50, "cohere": 33, "minimax": 500}
         self.last_reset = datetime.now()
 
         # Provider performance tracking

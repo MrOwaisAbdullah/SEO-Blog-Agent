@@ -94,7 +94,12 @@ image_quality_evaluation_agent = Agent(
     }
     ```
     """,
-    model=custom_runner.get_model_by_name("qwen-2.5-openrouter"),  # Using the specified model for advanced image analysis
+    # qwen-2.5-openrouter (qwen/qwen2.5-vl-32b-instruct:free) was removed from
+    # OpenRouter entirely -- not just its free tier, the model ID no longer
+    # exists at all. Gemini 2.5 Flash is multimodal (vision-capable), already
+    # free on this project's tier, and already configured elsewhere in this
+    # codebase, so it's a zero-new-cost, zero-new-dependency replacement.
+    model=custom_runner.get_model_by_name("gemini-2.5-flash"),
     model_settings=ModelSettings(temperature=0.3),  # Lower temperature for more consistent evaluations
 )
 

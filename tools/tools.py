@@ -5,10 +5,7 @@ import json
 from slugify import slugify
 import textstat
 from language_tool_python import LanguageTool
-from huggingface_hub import InferenceClient
 import time
-from PIL import Image
-from io import BytesIO
 from lib.sanity_adapter import SanityAdapter
 from dotenv import load_dotenv
 import tempfile
@@ -430,36 +427,6 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
         return {"error": "Freepik image generation timed out or invalid response"}
     except Exception as e:
         logger.error(f"Freepik failed: {str(e)}")
-
-    # Try Hugging Face (fallback) - still needs to save locally
-    try:
-        client = InferenceClient(
-            provider="hf-inference",
-            api_key=os.environ["HF_TOKEN"],
-            model="black-forest-labs/FLUX.1-dev"
-        )
-        image = client.text_to_image(prompt)
-        # Use a cross-platform temporary directory
-        import tempfile
-        import time
-        # Create a more persistent temporary file name
-        timestamp = int(time.time())
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, f"blog_image_{timestamp}.png")
-        image.save(file_path)
-        # Verify the file was created
-        if os.path.exists(file_path):
-            logger.info(f"Successfully created image file: {file_path}")
-            return {"image_url": file_path, "alt_text": f"{keyword} illustration", "source": "Hugging Face", "evaluation_score": 8.0, "feedback": "AI generated image from Hugging Face"}
-        else:
-            logger.error(f"Failed to create image file: {file_path}")
-            return {"error": "Failed to save generated image to file"}
-    except Exception as e:
-        error_msg = f"Hugging Face failed: {str(e)}"
-        logger.error(error_msg)
-        # If it's a payment issue, provide a more specific error
-        if "402" in str(e) or "payment" in str(e).lower() or "credit" in str(e).lower():
-            return {"error": "Hugging Face image generation failed due to payment/credit issues. Please check your subscription or billing details."}
 
     return {"error": "All image generation services failed"}
 

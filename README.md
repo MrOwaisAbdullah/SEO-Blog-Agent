@@ -59,19 +59,13 @@ SANITY_DEFAULT_AUTHOR_NAME="Your Author Name"
 # Google Sheets Credentials
 GOOGLE_CREDENTIALS={"type":"service_account","project_id":"your_project","private_key_id":"your_key_id","private_key":"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n","client_email":"your_service_account_email","client_id":"your_client_id","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs","client_x509_cert_url":"your_cert_url"}
 
-# Transcript API Keys
-ASSEMBLYAI_API_KEY=your_assemblyai_api_key
-YOUTUBE_TRANSCRIPT_IO_API_TOKEN=your_youtube_transcript_io_token
-
 # Search and Research API Keys
 TAVILY_API_KEY=your_tavily_api_key
-X_API_BEARER_TOKEN=your_twitter_bearer_token
 SERPAPI_KEY=your_serpapi_key
 
 # Image API Keys
+FREEPIC_API_KEY=your_freepik_api_key
 PEXELS_API_KEY=your_pexels_api_key
-STARRYAI_API_KEY=your_starryai_api_key
-HF_TOKEN=your_huggingface_token
 
 # Security
 API_KEY=your_custom_api_key_for_authentication
@@ -102,13 +96,11 @@ DEFAULT_MODEL=gemini-2.5-flash
 
 #### Search and Research API Keys
 - `TAVILY_API_KEY` - Tavily API key for web search and research
-- `X_API_BEARER_TOKEN` - Twitter/X API bearer token
-- `SERPAPI_KEY` - SerpAPI key for search data
+- `SERPAPI_KEY` - SerpAPI key for search data (fallback)
 
 #### Image API Keys
-- `PEXELS_API_KEY` - Pexels API key for stock images
-- `FREEPIC_API_KEY` - Freepik API key for image generation (primary)
-- `HF_TOKEN` - Hugging Face token for AI models (fallback)
+- `FREEPIC_API_KEY` - Freepik API key for image generation (primary; one-time trial credit, not an ongoing free tier)
+- `PEXELS_API_KEY` - Pexels API key for stock images (fallback)
 
 #### Security
 - `API_KEY` - Custom API key for authenticating requests to the agent API

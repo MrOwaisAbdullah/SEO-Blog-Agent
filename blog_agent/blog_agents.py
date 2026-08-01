@@ -140,7 +140,10 @@ content_evaluation_agent = Agent(
     ```
     """,
     tools=[manage_sheet_data_tool, web_search_tool, textstat_tool, grammar_check_tool],
-    model=custom_runner.get_model_by_name("gemini-2.0-flash"),
+    # gemini-2.0-flash was retired by Google (March 3, 2026). Flash-Lite is
+    # the appropriate, still-current, cheapest fit for a scoring/evaluation
+    # task (lighter than full content generation).
+    model=custom_runner.get_model_by_name("gemini-2.5-flash-lite"),
     hooks=MyAgentHooks(),
     model_settings=ModelSettings(temperature=0.4),
 )
