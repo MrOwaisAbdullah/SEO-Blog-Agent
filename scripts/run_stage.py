@@ -242,7 +242,7 @@ def _ensure_brief_persisted(brief: dict) -> None:
 
     existing = manage_sheet_data(worksheet_name="content_briefs", action="get_all_records")
     already_saved = existing.get("status") == "success" and any(
-        str(row.get("Keyword/Topic", "")).strip() == keyword for row in existing.get("data", [])
+        str(_get_field(row, "Keyword/Topic")).strip() == keyword for row in existing.get("data", [])
     )
 
     if already_saved:
@@ -334,7 +334,7 @@ def _ensure_content_persisted(content: dict) -> dict:
     existing_row = None
     if existing.get("status") == "success":
         for row in existing.get("data", []):
-            if str(row.get("Title", "")).strip() == title:
+            if str(_get_field(row, "Title")).strip() == title:
                 existing_row = row
 
     if existing_row:
