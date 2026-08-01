@@ -372,3 +372,90 @@ Also fixed while touching this file: `GITHUB_REPO` was set to a full
 message in Discord). `bot.py` now strips a `https://github.com/` (or
 `http://`) prefix and trailing `.git`/slash automatically, so this exact
 mistake doesn't recur even if the env var is set the "wrong" way again.
+
+## Second live-testing round: false-positive failures, quota, and Discord UX
+
+More real GitHub Actions logs surfaced two bugs that made successful runs
+look like failures, plus a batch of feature requests to make Discord the
+actual operating surface instead of just a notifier.
+
+1. **`scripts/run_stage.py` marked successful brief/content runs as
+   failed.** Both agents always return JSON containing an `"errors": []`
+   key, even on success. The failure check was `"error" in output.lower()`,
+   which matches the literal substring `"errors"` inside that key name —
+   every successful run tripped it, silently skipping the Discord draft
+   notification and showing red in Actions despite `"status": "success"` in
+   the actual payload. Fixed by parsing the JSON (stripping a ```json fence
+   if present) and checking the real `status` field
+   (`_agent_output_indicates_error`) instead of substring-matching.
+2. **Gemini quota assumed too high.** `model_limits["gemini"]` was `50`;
+   a live 429 response showed `quotaValue: '20'` — the real daily limit.
+   Lowered to `20` so the fallback chain (Gemini → OpenRouter free →
+   Cohere) rotates before Gemini actually starts erroring, instead of after.
+3. **Discord approval messages only showed the title/summary**, requiring a
+   trip to the sheet to read the actual post. `_notify_discord` in
+   `scripts/run_stage.py` now also posts the full `Generated Content` and
+   `FAQs` as follow-up messages, chunked on paragraph/line boundaries to
+   stay under Discord's 2000-char message cap (`_chunk_for_discord`) — the
+   original title/summary/react message is unchanged so the bot's
+   reaction-matching logic still works.
+4. **No stage ever reported status to Discord beyond the content-draft
+   notification** — a failed `research`/`brief`/`post` run was silent
+   outside the Actions log. `main()` now calls a new
+   `_notify_discord_status(stage, success, detail)` after every stage,
+   success or failure (skipped for `content` on success since it already
+   gets the richer draft notification).
+5. **Author context was fully hardcoded** in `get_author_context_tool`
+   (`tools/tools.py`) — bio, current job, skills never changed as the
+   portfolio site's own data did. It now fetches
+   `https://owaisabdullah.dev/api/profile` live and merges the current
+   `about`/`summary`/`current_roles`/`skills`/`key_highlights` into the
+   returned context under a `live_profile` key, falling back to the
+   original static context if the request fails. The static fields (tone,
+   banned words, CTAs) stay hardcoded since those are a style guide, not
+   biographical fact that goes stale.
+6. **Content-generation instructions strengthened against AI-sounding
+   writing.** Added a condensed "Anti-AI-Pattern Checklist" to
+   `content_generator_agent`'s prompt (`blog_agent/blog_agents.py`),
+   distilled from the repo's `humanizer-main` skill (Wikipedia's "Signs of
+   AI writing" guide): no inflated-significance phrases, no copula
+   avoidance ("serves as"/"stands as"), no rule-of-three padding, no vague
+   attributions, no curly quotes, no signposting ("let's dive in"), prefer
+   specifics over superlatives. `content_evaluation_agent` now also checks
+   for these tells as part of its readability scoring. (`social-media-writer`
+   wasn't a direct fit to fold in beyond this — it's tuned for short-form
+   LinkedIn/Twitter posts, which this pipeline doesn't generate; its
+   "specifics over superlatives, admit uncertainty" principles are the part
+   that carried over.)
+7. **Freepik 401 (`Unauthorized`) confirmed from live logs** — this is a
+   credential problem (the `FREEPIC_API_KEY` secret is invalid/expired),
+   not a code bug. `generate_image_tool` already fails gracefully (returns
+   `{"error": ...}`, no exception), and `image_selection_agent`'s own
+   instructions already fall back to `get_stock_image_tool` on generation
+   failure, so posts keep publishing with a stock photo instead of an
+   AI-generated one — but the AI-image feature is effectively off until the
+   key is regenerated in the Freepik dashboard and the GitHub secret is
+   updated. **This needs action from you**, not a code fix.
+8. **Posting-chain marker fragility** — real logs showed `"Contextual agent
+   did not return data with expected markers format"` followed by the
+   Posting Agent failing to find data between the `=== POST_DATA_START/END
+   ===` markers. Root cause: the Preparation → Contextual Image Insertion →
+   Posting handoff chain relied on each LLM call echoing a full
+   multi-thousand-word blog post back verbatim between literal text
+   markers. Fallback models (Cohere, OpenRouter free tier) routinely
+   mangled or dropped the markers when asked to pass that much text through
+   unmodified — asking an LLM to be a lossless wire format for data it has
+   no reason to touch is inherently fragile, and it gets more likely to
+   fail the more often a run lands on a non-primary model.
+
+   Fixed in `blog_agent/posting_agent.py` by parsing and rebuilding the
+   marker block in Python instead of trusting either agent's raw text:
+   `_parse_post_data_block` extracts `KEY: value` fields deterministically
+   (tolerant of colons inside the content body itself), and
+   `_build_post_data_block` reconstructs a guaranteed well-formed block
+   before it's handed to the next agent. If the Contextual Image Insertion
+   Agent drops the markers, the workflow now degrades gracefully — it keeps
+   the original prepared content without the extra contextual images and
+   continues — instead of failing the entire publish over a cosmetic
+   image-placement step. The Posting Agent now always receives a
+   Python-built block, removing that hop as a failure point entirely.

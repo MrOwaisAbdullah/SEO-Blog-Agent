@@ -143,7 +143,7 @@ anything:
 - **OpenRouter** — `OPENROUTER_API_KEY` from [openrouter.ai](https://openrouter.ai/).
   Used two ways: `openrouter/free` (an auto-router that always resolves to
   whatever's currently free, immune to any single free model being delisted)
-  as a regular fallback tier, and `deepseek/deepseek-v4-flash` as a **paid,
+  as a regular fallback tier, and `deepseek/deepseek-v4-flash-latest` as a **paid,
   genuinely-last-resort** tier — only tried once every free option above it
   has failed or is unavailable, regardless of how reliable it turns out to
   be (see the comment on `LAST_RESORT_MODELS` in `custom_runner.py`). Needs

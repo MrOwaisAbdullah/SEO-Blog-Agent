@@ -16,7 +16,9 @@ as the old endpoints.
 """
 import argparse
 import asyncio
+import json
 import os
+import re
 import sys
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
@@ -64,29 +66,126 @@ def _is_benign_empty(text: str) -> bool:
     return any(marker in lowered for marker in BENIGN_EMPTY_MARKERS)
 
 
-def _notify_discord(title: str, summary: str) -> None:
-    """Posts a draft-ready-for-review message. The Discord bot listens for
-    reactions on this message and matches them back to the sheet row by
-    Title, so the title must be included verbatim."""
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
+
+
+def _agent_output_indicates_error(output: str) -> bool:
+    """Every brief/content agent is instructed to return JSON with an
+    explicit "status" field, always including an "errors": [] key even on
+    success. Naively checking `"error" in output.lower()` false-positives on
+    that field's own name -- parse the JSON (stripping a ```json fence if
+    present) and trust its actual status instead. If the output isn't valid
+    JSON at all, that's itself treated as a failure worth surfacing rather
+    than silently guessed at with more substring heuristics.
+    """
+    fence_match = _JSON_FENCE_RE.search(output)
+    json_text = fence_match.group(1) if fence_match else output.strip()
+    try:
+        parsed = json.loads(json_text)
+    except (json.JSONDecodeError, TypeError):
+        return True
+    if isinstance(parsed, dict):
+        return parsed.get("status") == "error"
+    return False
+
+
+# Discord's hard cap is 2000 chars per message; leave headroom for the
+# "(n/total)" prefix we add to each chunk.
+DISCORD_MESSAGE_LIMIT = 1900
+
+
+def _chunk_for_discord(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list:
+    """Splits text into <=limit-char chunks on paragraph/line boundaries so
+    Markdown (headings, lists, links) doesn't get cut mid-token."""
+    if not text:
+        return []
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _post_discord_message(webhook_url: str, content: str) -> None:
+    response = requests.post(webhook_url, json={"content": content}, timeout=10)
+    response.raise_for_status()
+
+
+def _notify_discord(title: str, summary: str, content: str = "", faqs: str = "") -> None:
+    """Posts a draft-ready-for-review message, then the full post body (and
+    FAQs) as follow-up messages so a reviewer can read the whole thing,
+    correctly rendered, without opening the sheet. The Discord bot listens
+    for reactions on the FIRST message only (the one with the embedded
+    Title) and matches them back to the sheet row by Title, so that
+    message's format must stay exactly as-is."""
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     if not webhook_url:
         print("DISCORD_WEBHOOK_URL not set; skipping approval notification.")
         return
 
-    content = (
+    header = (
         "**New Draft Ready for Review**\n\n"
         f"**Title:** {title}\n"
         f"**Summary:** {summary}\n\n"
         "React with ✅ to approve or ❌ to reject."
     )
     try:
-        response = requests.post(webhook_url, json={"content": content}, timeout=10)
-        response.raise_for_status()
+        _post_discord_message(webhook_url, header)
     except Exception as e:
         # A failed notification shouldn't fail the whole stage -- the post
         # was already generated and saved; it just needs manual approval via
         # the sheet if Discord notification didn't go through.
         print(f"Failed to send Discord notification: {e}")
+        return
+
+    body_chunks = _chunk_for_discord(content)
+    for i, chunk in enumerate(body_chunks, start=1):
+        prefix = f"**Post ({i}/{len(body_chunks)})**\n\n" if len(body_chunks) > 1 else "**Post**\n\n"
+        try:
+            _post_discord_message(webhook_url, prefix + chunk)
+        except Exception as e:
+            print(f"Failed to send Discord post-content chunk {i}/{len(body_chunks)}: {e}")
+
+    if not faqs:
+        return
+    try:
+        parsed_faqs = json.loads(faqs)
+        faq_text = "\n\n".join(
+            f"**Q: {item.get('question', '')}**\nA: {item.get('answer', '')}" for item in parsed_faqs
+        )
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        faq_text = faqs
+    faq_chunks = _chunk_for_discord(faq_text)
+    for i, chunk in enumerate(faq_chunks, start=1):
+        prefix = f"**FAQs ({i}/{len(faq_chunks)})**\n\n" if len(faq_chunks) > 1 else "**FAQs**\n\n"
+        try:
+            _post_discord_message(webhook_url, prefix + chunk)
+        except Exception as e:
+            print(f"Failed to send Discord FAQ chunk {i}/{len(faq_chunks)}: {e}")
+
+
+def _notify_discord_status(stage: str, success: bool, detail: str = "") -> None:
+    """Posts a one-line status update for every stage run so failures show
+    up in Discord instead of only in the Actions log."""
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
+        return
+    icon = "✅" if success else "❌"
+    content = f"{icon} Stage `{stage}` {'completed' if success else 'failed'}."
+    if detail:
+        content += f"\n```{detail[:1800]}```"
+    try:
+        _post_discord_message(webhook_url, content)
+    except Exception as e:
+        print(f"Failed to send Discord status notification: {e}")
 
 
 async def run_research() -> None:
@@ -110,7 +209,7 @@ async def run_brief() -> None:
     )
     output = str(getattr(result, "final_output", result))
     print(f"[brief] result: {output}")
-    if "error" in output.lower() and not _is_benign_empty(output):
+    if _agent_output_indicates_error(output) and not _is_benign_empty(output):
         raise RuntimeError(f"Brief stage failed: {output}")
 
 
@@ -122,7 +221,7 @@ async def run_content() -> None:
     )
     output = str(getattr(result, "final_output", result))
     print(f"[content] result: {output}")
-    if "error" in output.lower() and not _is_benign_empty(output):
+    if _agent_output_indicates_error(output) and not _is_benign_empty(output):
         raise RuntimeError(f"Content stage failed: {output}")
 
     if _is_benign_empty(output):
@@ -135,6 +234,8 @@ async def run_content() -> None:
         _notify_discord(
             title=last_row.get("Title", "Untitled"),
             summary=last_row.get("Summary", ""),
+            content=last_row.get("Generated Content", ""),
+            faqs=last_row.get("FAQs", ""),
         )
     else:
         print("Could not read back generated_posts to send Discord notification.")
@@ -164,7 +265,13 @@ def main() -> None:
         asyncio.run(STAGE_HANDLERS[args.stage]())
     except Exception as e:
         print(f"Stage '{args.stage}' failed: {e}", file=sys.stderr)
+        _notify_discord_status(args.stage, success=False, detail=str(e))
         sys.exit(1)
+    else:
+        # "content" already gets a richer draft-ready notification via
+        # _notify_discord; a generic success ping on top would just be noise.
+        if args.stage != "content":
+            _notify_discord_status(args.stage, success=True)
 
 
 if __name__ == "__main__":

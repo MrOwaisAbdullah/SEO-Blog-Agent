@@ -156,6 +156,13 @@ def get_brand_context_tool():
         )
     }
 
+# The portfolio site's own API is the source of truth for anything that
+# changes over time (current job, bio, skills) -- hardcoding that here would
+# just go stale. Only the brand-voice constants below (tone, banned words,
+# CTAs, etc.) stay static, since those are a style guide, not biographical fact.
+AUTHOR_PROFILE_API_URL = "https://owaisabdullah.dev/api/profile"
+
+
 # Owais Abdullah – Personal Brand Context
 @function_tool
 def get_author_context_tool():
@@ -166,7 +173,7 @@ def get_author_context_tool():
       • Write website copy, captions, ads, and outreach emails
       • Keep a consistent tone across all platforms
     """
-    return {
+    static_context = {
         # Core Identity
         "brand_name": "Owais Abdullah",
         "tagline": "Web, AI & Automation—Made Simple.",
@@ -276,6 +283,28 @@ def get_author_context_tool():
         )
     }
 
+    try:
+        response = requests.get(AUTHOR_PROFILE_API_URL, timeout=10)
+        response.raise_for_status()
+        profile = response.json()
+    except Exception as e:
+        logger.warning(f"get_author_context_tool: live profile fetch failed, using static context only: {e}")
+        return static_context
+
+    current_roles = [
+        f"{job.get('title')} at {job.get('company')}"
+        for job in profile.get("work", [])
+        if str(job.get("end", "")).strip().lower() == "present"
+    ]
+    static_context["live_profile"] = {
+        "about": profile.get("about"),
+        "summary": profile.get("summary"),
+        "current_roles": current_roles,
+        "skills": profile.get("skills", []),
+        "key_highlights": [h.get("description") for h in profile.get("keyHighlights", []) if h.get("description")],
+    }
+    return static_context
+
 
 @function_tool
 def textstat_tool(content: str):
@@ -342,7 +371,9 @@ def get_stock_image_tool(keyword: str):
 
 @function_tool
 def generate_image_tool(keyword: str, custom_prompt: str = None):
-    """Generates an image for a blog post using Freepik API (primary) and Hugging Face (fallback)."""
+    """Generates an image for a blog post using the Freepik API. On failure, returns
+    an error dict -- the calling agent (image_selection_agent) is instructed to fall
+    back to get_stock_image_tool rather than this function retrying internally."""
 
     # Use custom prompt if provided, otherwise create a diverse, creative prompt
     if custom_prompt:

@@ -1,4 +1,5 @@
 import logging
+import re
 from agents import Agent, ModelSettings, AgentHooks, handoff, trace
 from tools.tools import post_to_sanity_tool, fetch_internal_links_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
@@ -215,6 +216,49 @@ posting_agent = Agent(
 )
 
 
+# --- Deterministic marker parsing ---
+# The Preparation -> Contextual Image Insertion -> Posting handoff chain used
+# to rely on each LLM call echoing the entire === POST_DATA_START/END ===
+# block (including a full multi-thousand-word blog post) back verbatim.
+# Weaker fallback models (Cohere, OpenRouter free tier) routinely mangle,
+# summarize, or drop the markers when asked to pass through that much text
+# untouched, which surfaced in production as "Contextual agent did not
+# return data with expected markers format" and a hard workflow failure.
+# Parsing the block in Python -- and rebuilding it in Python before it's
+# handed to the next agent -- removes the LLM as a lossy transport for data
+# it already has no reason to be modifying.
+_POST_DATA_FIELD_RE = re.compile(r"^([A-Z_]{2,}):\s?", re.MULTILINE)
+
+
+def _parse_post_data_block(text: str) -> Optional[Dict[str, str]]:
+    if not isinstance(text, str):
+        return None
+    start = text.find("=== POST_DATA_START ===")
+    end = text.find("=== POST_DATA_END ===")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    body = text[start + len("=== POST_DATA_START ==="):end]
+
+    matches = list(_POST_DATA_FIELD_RE.finditer(body))
+    if not matches:
+        return None
+    fields = {}
+    for i, m in enumerate(matches):
+        key = m.group(1)
+        value_start = m.end()
+        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        fields[key] = body[value_start:value_end].strip()
+    return fields
+
+
+def _build_post_data_block(fields: Dict[str, str]) -> str:
+    lines = ["=== POST_DATA_START ==="]
+    for key, value in fields.items():
+        lines.append(f"{key}: {value}")
+    lines.append("=== POST_DATA_END ===")
+    return "\n".join(lines)
+
+
 # --- Function Flow Definition ---
 # This defines the sequence: Preparation Agent runs -> Output captured -> Posting Agent runs with output
 
@@ -322,8 +366,11 @@ async def run_posting_workflow(max_retries: int = 3) -> Dict[str, Any]:
             # in the structured === POST_DATA_START === format. Instead of relying on
             # SDK-level handoffs, explicitly run the Contextual Image Insertion Agent
             # with the preparation output, then pass that result to the Posting Agent.
-            import re
-            
+            prep_fields = _parse_post_data_block(preparation_output_str)
+            if not prep_fields or "CONTENT_WITH_LINKS" not in prep_fields:
+                logger.error("Preparation Agent output did not contain a parseable POST_DATA block")
+                return {"status": "error", "error": f"Preparation Agent output missing required POST_DATA fields: {preparation_output_str[:300]}"}
+
             # Run Contextual Image Insertion Agent with retry logic
             contextual_result = None
             for attempt in range(max_retries):
@@ -351,33 +398,30 @@ async def run_posting_workflow(max_retries: int = 3) -> Dict[str, Any]:
                 logger.error(f"Contextual Image Insertion Agent failed after {max_retries} attempts")
                 return {"status": "error", "error": f"Contextual Image Insertion Agent failed after {max_retries} attempts: {str(contextual_result)}"}
 
-            # Normalize the contextual agent result
-            def _extract_text(res):
-                try:
-                    if hasattr(res, 'final_output') and res.final_output is not None:
-                        result_str = str(res.final_output)
-                    elif hasattr(res, 'output') and res.output is not None:
-                        result_str = str(res.output)
-                    elif hasattr(res, 'input') and res.input is not None:
-                        result_str = str(res.input)
-                    else:
-                        result_str = str(res)
-                    
-                    # Check if the result contains the expected markers
-                    if "=== POST_DATA_START ===" in result_str and "=== POST_DATA_END ===" in result_str:
-                        logger.info("Contextual agent returned data with proper markers format")
-                        return result_str
-                    else:
-                        logger.warning("Contextual agent did not return data with expected markers format")
-                        logger.info(f"Result preview: {result_str[:200]}...")
-                    
-                    return result_str
-                except Exception as e:
-                    logger.error(f"Error in _extract_text: {e}")
-                    return str(res)
+            contextual_output_raw = str(getattr(contextual_result, "final_output", contextual_result))
+            contextual_fields = _parse_post_data_block(contextual_output_raw)
+            if contextual_fields and "CONTENT_WITH_LINKS" in contextual_fields:
+                logger.info("Contextual agent returned a parseable POST_DATA block")
+                post_fields = contextual_fields
+            else:
+                # A fallback model dropped/mangled the markers while echoing
+                # back the full post. Rather than fail the whole publish over
+                # a cosmetic image-insertion step, degrade gracefully: keep
+                # the original prepared content (no extra contextual images)
+                # and continue. The image already selected in Preparation
+                # (IMAGE_URL) still gets published either way.
+                logger.warning(
+                    "Contextual agent did not return a parseable POST_DATA block; "
+                    "continuing without contextual image insertion. Preview: %s",
+                    contextual_output_raw[:200],
+                )
+                post_fields = prep_fields
 
-            contextual_text = _extract_text(contextual_result)
-            has_images = bool(re.search(r"!\[.*\]\(.*\)", contextual_text))
+            # Rebuild the marker block deterministically instead of trusting
+            # either agent's raw text -- guarantees the Posting Agent always
+            # receives a well-formed block regardless of which model ran it.
+            contextual_text = _build_post_data_block(post_fields)
+            has_images = bool(re.search(r"!\[.*\]\(.*\)", post_fields.get("CONTENT_WITH_LINKS", "")))
             logger.info(f"Contextual agent produced image markdown: {has_images}")
 
             # Run Posting Agent with retry logic

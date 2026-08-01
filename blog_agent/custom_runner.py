@@ -64,19 +64,26 @@ class FallbackAgentRunner(AgentRunner):
         # invoked as a tool, so its own fixed model is never swapped by the
         # fallback runner.
         self.LAST_RESORT_MODELS = [
-            {"name": "deepseek-v4-flash", "model": "deepseek/deepseek-v4-flash", "provider": "openrouter-paid"},
+            {"name": "deepseek-v4-flash", "model": "deepseek/deepseek-v4-flash-latest", "provider": "openrouter-paid"},
         ]
 
         # Quota tracking at provider level
         self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, "openrouter-paid": 0,
         # "minimax": 0
         }
-        # Approximate daily limits. openrouter's free tier is 50/day without
-        # ever having purchased credits (1000/day only applies once you've
-        # bought $10+ in credits at some point, which isn't "free" anymore).
+        # Approximate daily limits. Gemini's free-tier limit is per specific
+        # model, not a flat account-wide number -- confirmed live from a real
+        # 429 response: "generativelanguage.googleapis.com/generate_content_
+        # free_tier_requests... quotaValue: 20" for whatever model
+        # gemini-flash-latest currently resolves to. 50 was an earlier,
+        # too-optimistic guess; lowered so the code proactively switches
+        # providers before hitting the real cap instead of burning retries
+        # on repeated 429s. openrouter's free tier is 50/day without ever
+        # having purchased credits (1000/day only applies once you've bought
+        # $10+ in credits at some point, which isn't "free" anymore).
         # openrouter-paid has no real daily cap (it's pay-per-token, not
         # quota-limited) -- the number below is just a sanity ceiling.
-        self.model_limits = {"gemini": 50, "openrouter": 50, "cohere": 33, "openrouter-paid": 1000, "minimax": 500}
+        self.model_limits = {"gemini": 20, "openrouter": 50, "cohere": 33, "openrouter-paid": 1000, "minimax": 500}
         self.last_reset = datetime.now()
 
         # Provider performance tracking
