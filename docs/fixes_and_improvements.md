@@ -502,3 +502,48 @@ Implementation notes:
   tier (falls to Pexels) if `CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN`
   aren't set, same graceful-degradation pattern as everything else in this
   fallback chain.
+
+## Third live-testing round: agent reports success without saving anything
+
+Real run: `pipeline.yml`'s `brief` stage finished green, the printed
+`[brief] result` was a complete, well-formed JSON brief with
+`"status": "success"`, and `content_briefs` still had nothing in it. Reading
+the full tool-call log line by line showed why: Gemini hit its daily 429,
+fell back to Cohere, and Cohere called `find_row_by_key` on `research_data`,
+`get_author_context_tool`, `tavily_search_tool`, and `tavily_extract_tool` --
+then just wrote the final JSON answer as text instead of also calling
+`manage_sheet_data_tool` with `action="append_row"` to actually save it, and
+never updated `research_data`'s `Generated` column either. Nothing in the
+JSON itself said this happened; `"status": "success"` was **true** as far as
+the model was concerned -- it had successfully produced a correct brief, it
+just never persisted it.
+
+This is the same underlying failure mode as the posting-chain marker
+fragility fixed earlier: a fallback model correctly did the "thinking" part
+of a multi-step task but silently skipped an actual side-effecting tool call
+near the end of a long turn sequence, and nothing in the pipeline verified
+that the side effect actually happened before treating the stage as done.
+
+Fixed in `scripts/run_stage.py`: `run_brief()` and `run_content()` no longer
+trust the agent's JSON `"status": "success"` as proof that anything was
+written. After parsing the JSON (`_parse_agent_json`, factored out of
+`_agent_output_indicates_error`), `_ensure_brief_persisted()` /
+`_ensure_content_persisted()` check whether a matching row (by
+`Keyword/Topic` / `Title`) already exists in `content_briefs` /
+`generated_posts` and, if not, append it directly via `manage_sheet_data` --
+the same underlying function the agent's own tool wraps, called
+deterministically from Python instead of hoping the model calls it.
+`_ensure_brief_persisted` also marks the source `research_data` row's
+`Generated` column as `"Yes"` if the agent didn't, so the same research
+finding can't get silently reprocessed on the next brief run. `run_content`
+now also uses the *actually persisted* row (not just "the last row in the
+sheet") for the Discord draft notification, so a stale row can't get
+mistakenly announced as a new draft if the agent's save had failed.
+
+Broader takeaway for this pipeline: any step where an agent's job includes
+"call a tool to save X" is a step that can silently no-op on a weaker
+fallback model, even when everything else about its output looks perfect.
+The fix pattern going forward is the same each time: keep the agent's
+instructions asking it to save (it works fine most of the time, on Gemini
+especially), but never let the *stage's* definition of success depend on
+trusting that it did -- verify or do it deterministically in Python instead.

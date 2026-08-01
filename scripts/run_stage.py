@@ -69,24 +69,31 @@ def _is_benign_empty(text: str) -> bool:
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 
 
-def _agent_output_indicates_error(output: str) -> bool:
-    """Every brief/content agent is instructed to return JSON with an
-    explicit "status" field, always including an "errors": [] key even on
-    success. Naively checking `"error" in output.lower()` false-positives on
-    that field's own name -- parse the JSON (stripping a ```json fence if
-    present) and trust its actual status instead. If the output isn't valid
-    JSON at all, that's itself treated as a failure worth surfacing rather
-    than silently guessed at with more substring heuristics.
-    """
+def _parse_agent_json(output: str):
+    """Parses a brief/content agent's JSON response, stripping a ```json
+    fence if present. Returns None if the output isn't a valid JSON object."""
     fence_match = _JSON_FENCE_RE.search(output)
     json_text = fence_match.group(1) if fence_match else output.strip()
     try:
         parsed = json.loads(json_text)
     except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _agent_output_indicates_error(output: str) -> bool:
+    """Every brief/content agent is instructed to return JSON with an
+    explicit "status" field, always including an "errors": [] key even on
+    success. Naively checking `"error" in output.lower()` false-positives on
+    that field's own name -- parse the JSON and trust its actual status
+    instead. If the output isn't valid JSON at all, that's itself treated as
+    a failure worth surfacing rather than silently guessed at with more
+    substring heuristics.
+    """
+    parsed = _parse_agent_json(output)
+    if parsed is None:
         return True
-    if isinstance(parsed, dict):
-        return parsed.get("status") == "error"
-    return False
+    return parsed.get("status") == "error"
 
 
 # Discord's hard cap is 2000 chars per message; leave headroom for the
@@ -201,6 +208,77 @@ async def run_research() -> None:
         raise RuntimeError(f"Research stage failed: {result['error']}")
 
 
+def _ensure_brief_persisted(brief: dict) -> None:
+    """The Brief Agent is instructed to save its own output via
+    manage_sheet_data_tool, but a fallback model can generate a fully
+    correct JSON answer and then simply stop instead of actually calling the
+    tool -- confirmed live (Cohere, after a Gemini 429): the stage reported
+    "success" with a complete brief in its output, but content_briefs never
+    got the row. Verify the row actually exists here and write it
+    deterministically if not, so a stage can't report success without
+    actually persisting its output -- the same class of fix already applied
+    to the posting chain's marker round-tripping."""
+    keyword = str(brief.get("Keyword/Topic", "")).strip()
+    if not keyword:
+        raise RuntimeError("Brief output missing Keyword/Topic; cannot persist or verify.")
+
+    existing = manage_sheet_data(worksheet_name="content_briefs", action="get_all_records")
+    already_saved = existing.get("status") == "success" and any(
+        str(row.get("Keyword/Topic", "")).strip() == keyword for row in existing.get("data", [])
+    )
+
+    if already_saved:
+        print(f"[brief] content_briefs already has a row for '{keyword}'; agent saved it correctly.")
+    else:
+        faqs = brief.get("FAQs", [])
+        faqs_str = faqs if isinstance(faqs, str) else json.dumps(faqs)
+        append_result = manage_sheet_data(
+            worksheet_name="content_briefs",
+            action="append_row",
+            row_values=[
+                keyword,
+                str(brief.get("Brief Content", "")),
+                faqs_str,
+                str(brief.get("External Source Links", "")),
+                str(brief.get("Content Summary", "")),
+                "No",
+            ],
+        )
+        if append_result.get("status") != "success":
+            raise RuntimeError(f"Failed to persist brief to content_briefs: {append_result}")
+        print(f"[brief] Appended row to content_briefs for '{keyword}' (agent reported success but had not saved it).")
+
+    # Mark the source research_data row as consumed so the next brief run
+    # doesn't pick up the same row again.
+    lookup = manage_sheet_data(
+        worksheet_name="research_data",
+        action="find_row_by_key",
+        key_column="Keyword/Topic",
+        key_value=keyword,
+    )
+    if not (lookup.get("status") == "success" and lookup.get("found")):
+        print(f"[brief] Warning: could not find research_data row for '{keyword}' to mark as Generated.")
+        return
+    if str((lookup.get("data") or {}).get("Generated", "")).strip().lower() == "yes":
+        print(f"[brief] research_data row for '{keyword}' already marked Generated=Yes.")
+        return
+
+    headers_result = manage_sheet_data(worksheet_name="research_data", action="get_range", cell_range="1:1")
+    header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else []
+    if "Generated" not in header_row:
+        print("[brief] Warning: 'Generated' column not found in research_data headers; cannot mark row consumed.")
+        return
+    update_result = manage_sheet_data(
+        worksheet_name="research_data",
+        action="update_cell",
+        row_index=lookup["row_index"],
+        col_index=header_row.index("Generated") + 1,
+        data="Yes",
+    )
+    if update_result.get("status") != "success":
+        print(f"[brief] Warning: failed to mark research_data row {lookup['row_index']} as Generated=Yes: {update_result}")
+
+
 async def run_brief() -> None:
     result = await custom_runner.run_with_fallback(
         brief_agent,
@@ -211,6 +289,58 @@ async def run_brief() -> None:
     print(f"[brief] result: {output}")
     if _agent_output_indicates_error(output) and not _is_benign_empty(output):
         raise RuntimeError(f"Brief stage failed: {output}")
+
+    if _is_benign_empty(output):
+        return
+
+    parsed = _parse_agent_json(output)
+    if not parsed:
+        raise RuntimeError(f"Brief stage reported success but produced unparseable output: {output[:300]}")
+    _ensure_brief_persisted(parsed)
+
+
+def _ensure_content_persisted(content: dict) -> dict:
+    """Same fix as _ensure_brief_persisted, for the Content Generator Agent
+    -> generated_posts. Returns the persisted row (existing or freshly
+    appended) so the caller can use it directly for the Discord notification
+    instead of blindly trusting "last row = the one just generated", which
+    would silently notify about a stale row if the agent hadn't actually
+    saved anything."""
+    title = str(content.get("Title", "")).strip()
+    if not title:
+        raise RuntimeError("Content output missing Title; cannot persist or verify.")
+
+    existing = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    existing_row = None
+    if existing.get("status") == "success":
+        for row in existing.get("data", []):
+            if str(row.get("Title", "")).strip() == title:
+                existing_row = row
+
+    if existing_row:
+        print(f"[content] generated_posts already has a row for '{title}'; agent saved it correctly.")
+        return existing_row
+
+    faqs = content.get("FAQs", [])
+    faqs_str = faqs if isinstance(faqs, str) else json.dumps(faqs)
+    row_values = {
+        "Title": title,
+        "Generated Content": str(content.get("Generated Content", "")),
+        "FAQs": faqs_str,
+        "Quality Score": str(content.get("Quality Score", "")),
+        "Summary": str(content.get("Summary", "")),
+        "Approve/Disapprove": str(content.get("Approve/Disapprove", "Approved")),
+        "Published": str(content.get("Published", "No")),
+    }
+    append_result = manage_sheet_data(
+        worksheet_name="generated_posts",
+        action="append_row",
+        row_values=list(row_values.values()),
+    )
+    if append_result.get("status") != "success":
+        raise RuntimeError(f"Failed to persist content to generated_posts: {append_result}")
+    print(f"[content] Appended row to generated_posts for '{title}' (agent reported success but had not saved it).")
+    return row_values
 
 
 async def run_content() -> None:
@@ -227,18 +357,17 @@ async def run_content() -> None:
     if _is_benign_empty(output):
         return
 
-    # Read back the row that was just written and notify Discord for approval.
-    records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
-    if records.get("status") == "success" and records.get("data"):
-        last_row = records["data"][-1]
-        _notify_discord(
-            title=last_row.get("Title", "Untitled"),
-            summary=last_row.get("Summary", ""),
-            content=last_row.get("Generated Content", ""),
-            faqs=last_row.get("FAQs", ""),
-        )
-    else:
-        print("Could not read back generated_posts to send Discord notification.")
+    parsed = _parse_agent_json(output)
+    if not parsed:
+        raise RuntimeError(f"Content stage reported success but produced unparseable output: {output[:300]}")
+
+    persisted_row = _ensure_content_persisted(parsed)
+    _notify_discord(
+        title=persisted_row.get("Title", "Untitled"),
+        summary=persisted_row.get("Summary", ""),
+        content=persisted_row.get("Generated Content", ""),
+        faqs=persisted_row.get("FAQs", ""),
+    )
 
 
 async def run_post() -> None:
