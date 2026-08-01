@@ -254,8 +254,13 @@ Discord call `workflow_dispatch`.
    mapping** (it's a background worker holding a Discord gateway connection,
    not an HTTP service) → restart policy: always.
 2. Set these in Dokploy's runtime env panel (not baked into the image):
-   `DISCORD_BOT_TOKEN`, `GITHUB_PAT`, `GITHUB_REPO` (`owner/repo`),
-   `GOOGLE_CREDENTIALS`, `DISCORD_APPROVAL_CHANNEL_ID`.
+   `DISCORD_BOT_TOKEN`, `GITHUB_PAT`, `GITHUB_REPO` (`owner/repo`,
+   e.g. `MrOwaisAbdullah/SEO-Blog-Agent` — **not** the full
+   `https://github.com/...` URL, an easy copy-paste mistake that produces a
+   404 from `/run` since the dispatch URL gets built as
+   `.../repos/https://github.com/.../actions/workflows/...`; `bot.py`
+   normalizes this automatically now, but the plain `owner/repo` form is
+   still the documented one), `GOOGLE_CREDENTIALS`, `DISCORD_APPROVAL_CHANNEL_ID`.
 3. Create a scoped, expiring Dokploy API key (Dokploy → API keys) and note
    this application's ID (its detail page in the panel).
 4. Back in GitHub, add `DOKPLOY_URL` (`https://deploy.yourdomain.com`),
@@ -280,6 +285,21 @@ a stale connection to one stage instead of a failure somewhere in the middle.
 After `content` runs, confirm the Discord message shows up in the approval
 channel, react ✅, and confirm the `Approve/Disapprove` cell in
 `generated_posts` actually updates before trusting the `post` stage.
+
+### 7. Adding topics via `/add_topic`
+
+`/add_topic` appends a new row to `ContentSpark_Keywords` with
+`Status=available`, for the Triage Agent to pick up on the next `research`
+run — same effect as adding a row to that sheet by hand. Two ways to submit:
+
+- `text` — a short concept or problem statement, typed directly.
+- `file` — a `.txt` attachment, for anything too long for a Discord text
+  field (a full video transcript, for example). At least one of the two is
+  required; if both are given, they're concatenated.
+
+Content over Google Sheets' 50,000-character cell limit is truncated, with a
+warning in the bot's reply. There's no dedup check — submitting the same
+topic twice adds it twice.
 
 ## Corrections to README.md
 

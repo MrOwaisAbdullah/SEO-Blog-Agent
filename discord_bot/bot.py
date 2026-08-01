@@ -1,13 +1,17 @@
 """
 Discord bot for ContentSpark AI.
 
-Two responsibilities:
+Three responsibilities:
   1. Approvals -- listens for checkmark/cross reactions on draft-preview
      messages (posted by scripts/run_stage.py's Discord webhook call after the
      "content" stage) and writes the result into the Approve/Disapprove column
      of the generated_posts worksheet.
   2. Triggering -- a /run slash command that dispatches pipeline.yml via
      GitHub's workflow_dispatch API, for on-demand runs.
+  3. Queueing -- a /add_topic slash command that appends a new row to
+     ContentSpark_Keywords (Status=available) from a short concept/problem
+     statement or an uploaded .txt transcript, for the Triage Agent to pick
+     up on the next research run.
 
 Deliberately self-contained: talks to Google Sheets directly via gspread
 instead of importing tools/sheet_tool.py from the main pipeline. That module
@@ -21,6 +25,7 @@ import json
 import logging
 import os
 import time
+from typing import Optional
 
 import discord
 import gspread
@@ -34,7 +39,16 @@ logger = logging.getLogger("contentspark-bot")
 
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 GITHUB_PAT = os.environ["GITHUB_PAT"]
-GITHUB_REPO = os.environ["GITHUB_REPO"]  # "owner/repo"
+# Expected as "owner/repo", but a full GitHub URL is an easy mistake to paste
+# into a Dokploy env field -- normalize it instead of hard-failing on it.
+GITHUB_REPO = (
+    os.environ["GITHUB_REPO"]
+    .strip()
+    .removeprefix("https://github.com/")
+    .removeprefix("http://github.com/")
+    .removesuffix(".git")
+    .strip("/")
+)
 APPROVAL_CHANNEL_ID = int(os.environ["DISCORD_APPROVAL_CHANNEL_ID"])
 
 SHEET_SCOPE = [
@@ -45,6 +59,15 @@ SPREADSHEET_NAME = "ContentSpark"
 WORKSHEET_NAME = "generated_posts"
 # Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published
 APPROVE_DISAPPROVE_COLUMN = 6
+
+# ContentSpark_Keywords is a separate spreadsheet file (not a worksheet
+# inside ContentSpark) -- see docs/service_setup.md section 2b. get_keyword_tool
+# reads its first sheet, expecting columns: Keyword, Status.
+KEYWORDS_SPREADSHEET_NAME = "ContentSpark_Keywords"
+
+# Google Sheets caps a single cell at 50,000 characters. Leave headroom
+# rather than hitting that exactly.
+MAX_KEYWORD_CELL_LENGTH = 49000
 
 STAGE_CHOICES = ["research", "brief", "content", "post"]
 
@@ -63,7 +86,7 @@ WATCHDOG_INTERVAL_SECONDS = 30
 _gspread_client = None
 
 
-def _get_worksheet():
+def _get_gspread_client():
     """Cached, same rationale as tools/sheet_tool.py's client caching:
     google-auth Credentials refresh their own tokens, so it's safe to reuse
     one authorized client across events instead of re-authenticating on every
@@ -73,7 +96,15 @@ def _get_worksheet():
         creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS"])
         creds = Credentials.from_service_account_info(creds_info, scopes=SHEET_SCOPE)
         _gspread_client = gspread.authorize(creds)
-    return _gspread_client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+    return _gspread_client
+
+
+def _get_worksheet():
+    return _get_gspread_client().open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+
+
+def _get_keywords_worksheet():
+    return _get_gspread_client().open(KEYWORDS_SPREADSHEET_NAME).sheet1
 
 
 def set_approval(title: str, status: str) -> bool:
@@ -86,6 +117,14 @@ def set_approval(title: str, status: str) -> bool:
             worksheet.update_cell(i, APPROVE_DISAPPROVE_COLUMN, status)
             return True
     return False
+
+
+def add_keyword(content: str) -> None:
+    """Appends a new row to ContentSpark_Keywords with Status=available, so
+    the Triage Agent picks it up on the next research run. Matches the
+    columns get_keyword_tool (tools/sheet_tool.py) expects: Keyword, Status."""
+    worksheet = _get_keywords_worksheet()
+    worksheet.append_row([content, "available"])
 
 
 def dispatch_workflow(stage: str) -> None:
@@ -208,6 +247,63 @@ async def run_stage_command(interaction: discord.Interaction, stage: app_command
         await interaction.followup.send(f"⚠️ Failed to trigger `{stage.value}`: {e}")
         return
     await interaction.followup.send(f"🚀 Triggered `{stage.value}`. Check the Actions tab for progress.")
+
+
+@bot.tree.command(name="add_topic", description="Add a keyword, concept, problem, or transcript to the research queue")
+@app_commands.describe(
+    text="A short concept or problem statement (leave empty if attaching a file)",
+    file="A .txt file for longer content like a full transcript (leave empty if using text)",
+)
+async def add_topic_command(
+    interaction: discord.Interaction,
+    text: Optional[str] = None,
+    file: Optional[discord.Attachment] = None,
+):
+    await interaction.response.defer(thinking=True)
+
+    if not text and not file:
+        await interaction.followup.send("⚠️ Provide either `text` or a `file` attachment.")
+        return
+
+    parts = []
+    if text:
+        parts.append(text.strip())
+    if file:
+        if not file.filename.lower().endswith(".txt"):
+            await interaction.followup.send("⚠️ Only `.txt` file attachments are supported.")
+            return
+        try:
+            raw = await file.read()
+            parts.append(raw.decode("utf-8").strip())
+        except UnicodeDecodeError:
+            await interaction.followup.send("⚠️ Couldn't decode that file as UTF-8 text.")
+            return
+        except Exception as e:
+            logger.exception("Failed to read attachment %s", file.filename)
+            await interaction.followup.send(f"⚠️ Failed to read the attached file: {e}")
+            return
+
+    content = "\n\n".join(p for p in parts if p)
+    if not content:
+        await interaction.followup.send("⚠️ That submission was empty after trimming whitespace.")
+        return
+
+    truncated = len(content) > MAX_KEYWORD_CELL_LENGTH
+    if truncated:
+        content = content[:MAX_KEYWORD_CELL_LENGTH]
+
+    try:
+        add_keyword(content)
+    except Exception as e:
+        logger.exception("Failed to add topic to ContentSpark_Keywords")
+        await interaction.followup.send(f"⚠️ Failed to add to the research queue: {e}")
+        return
+
+    preview = content[:150] + ("…" if len(content) > 150 else "")
+    reply = f"✅ Added to the research queue:\n> {preview}"
+    if truncated:
+        reply += "\n⚠️ Content was truncated to fit Google Sheets' 50,000-character cell limit."
+    await interaction.followup.send(reply)
 
 
 if __name__ == "__main__":

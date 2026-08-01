@@ -317,3 +317,58 @@ gateway connection, `workflow_dispatch` dispatch, and a real Dokploy deploy —
 no bot token, GitHub PAT, or Dokploy credentials available here. See
 `docs/service_setup.md`'s "Discord bot + GitHub Actions setup" section for
 the end-to-end verification steps to run once secrets are in place.
+
+## Live testing round: real bugs found once actually deployed
+
+Once the bot and pipeline were live, three real issues surfaced that no
+amount of local/offline testing could have caught:
+
+1. **`astral-sh/setup-uv@v8` doesn't exist as a tag** (only fully-specified
+   versions like `v8.3.2`, or newer `v9.0.0`) — `pipeline.yml`'s first real
+   run failed at "Set up job" before any code executed. Verified the actual
+   available tags via `gh api repos/astral-sh/setup-uv/tags` rather than
+   guessing again; also bumped `actions/checkout`, `docker/setup-buildx-action`,
+   `docker/login-action`, `docker/build-push-action` to their current major
+   tags while fixing this (confirmed each one actually exists first).
+2. **`scripts/run_stage.py` raised `ModuleNotFoundError: No module named
+   'blog_agent'` under the real `python scripts/run_stage.py` invocation.**
+   Python puts a script's own directory on `sys.path[0]` when run by path,
+   not the repo root — `blog_agent`/`tools`/`lib` are siblings of `scripts/`,
+   not inside it. Every local test this session used `python -c
+   "sys.path.insert(0, '.'); import ..."` from the repo root, which never
+   exercises this failure mode — only actually running the script the way
+   the workflow does caught it. Fixed with an explicit `sys.path.insert(0,
+   repo_root)` at the top of the file, confirmed by reproducing the exact
+   failing invocation locally before pushing again.
+3. **`gemini-2.5-flash` and `gemini-2.5-flash-lite` both 404'd** against the
+   real `GEMINI_API_KEY` with "no longer available to new users" — see the
+   "Fix live Gemini 404s" entry above.
+
+Takeaway worth keeping in mind for future changes to this pipeline: nothing
+here was catchable by import checks or `TestClient` smoke tests alone. A
+`.github/workflows/check-models.yml` diagnostic now exists specifically so
+model-availability regressions are a 30-second manual check instead of a
+live pipeline failure discovered after the fact — but for genuinely new
+code paths (a new workflow, a new script entrypoint), there's no substitute
+for actually triggering it once for real before considering it done.
+
+## Added: `/add_topic` Discord command
+
+Added a third bot responsibility beyond approvals and triggering: `/run` and
+reactions cover the pipeline's existing flow, but there was no way to get a
+*new* topic into the queue without manually editing the
+`ContentSpark_Keywords` sheet. `/add_topic` (`discord_bot/bot.py`) accepts
+either a short `text` concept/problem or a `.txt` `file` attachment (for
+content too long for a Discord text field, like a full video transcript) and
+appends it as a new `available` row — same effect as adding the row by hand,
+just from Discord. Considered adding this as a FastAPI endpoint instead, but
+`main.py` isn't deployed anywhere anymore (fully replaced by GitHub Actions +
+the bot), so a direct Sheets write from the bot — consistent with how
+reactions already work — avoided standing up a server for no other reason.
+
+Also fixed while touching this file: `GITHUB_REPO` was set to a full
+`https://github.com/...` URL in Dokploy instead of `owner/repo`, which broke
+`/run`'s GitHub API call with a 404 (confirmed live, from the bot's own error
+message in Discord). `bot.py` now strips a `https://github.com/` (or
+`http://`) prefix and trailing `.git`/slash automatically, so this exact
+mistake doesn't recur even if the env var is set the "wrong" way again.
