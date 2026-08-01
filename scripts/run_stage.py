@@ -320,53 +320,88 @@ async def run_brief() -> None:
     _ensure_brief_persisted(parsed)
 
 
-_H1_RE = re.compile(r"^#\s+(.+?)\s*\n", re.MULTILINE)
-_FAQ_HEADING_RE = re.compile(r"^##\s*FAQs?\s*$", re.MULTILINE | re.IGNORECASE)
-_HEADING_RE = re.compile(r"^##\s+.+$", re.MULTILINE)
+_TITLE_HEADING_RE = re.compile(r"^#{1,3}\s+(.+?)\s*\n", re.MULTILINE)
+_FAQ_JSON_RE = re.compile(r"\[\s*\{.*?\"question\".*?\}\s*\]", re.DOTALL)
+_FAQ_LABEL_RE = re.compile(r"^(?:#{2,3}\s*FAQs?|\*\*FAQs?\*\*)\s*$", re.MULTILINE | re.IGNORECASE)
+_SECTION_BREAK_RE = re.compile(r"^(?:#{2,3}\s+.+|\*\*[A-Z][a-zA-Z ]*\*\*:?)\s*$", re.MULTILINE)
 _FAQ_PAIR_RE = re.compile(r"\*\*(.+?)\*\*\s*\n(.+?)(?=\n\*\*|\Z)", re.DOTALL)
+_SUMMARY_LABEL_RE = re.compile(r"^\*\*(?:Meta Description|Summary)\*\*:?\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+_TRAILING_RULE_RE = re.compile(r"\n-{3,}\s*\n")
 
 
 def _extract_content_from_markdown(output: str) -> Optional[dict]:
     """Salvage a full blog post when a fallback model skips the required
-    JSON envelope entirely and just returns raw Markdown -- confirmed live:
-    Cohere did exactly this for the Content Generator Agent, returning a
-    complete, well-researched post as plain text instead of the documented
-    JSON structure. Discarding it and forcing a full regeneration would
-    waste more of an already-scarce fallback-provider quota on a post that
-    was already correctly written. Only called after _parse_agent_json has
-    already failed; output that isn't actually a real post (too short, no
-    title) still falls through to a genuine failure."""
+    JSON envelope entirely and just returns raw Markdown instead -- confirmed
+    live across multiple runs, each in a different shape (title as "#" vs
+    "##", FAQs as a "## FAQs" heading with **Q**/A pairs vs a "**FAQs**"
+    label followed by a raw JSON array, an optional "**Summary**: ..."
+    line). Discarding a fully-written, well-researched post and forcing a
+    full regeneration would waste more of an already-scarce fallback-provider
+    quota for nothing, so this tries to recover the same fields the JSON
+    envelope would have contained regardless of which shape came back.
+    Output that isn't actually a real post (too short, no title) still falls
+    through to a genuine failure."""
     text = output.strip()
     if not text.startswith("#"):
         return None
 
-    h1_match = _H1_RE.match(text)
-    title = h1_match.group(1).strip() if h1_match else ""
-    body = text[h1_match.end():] if h1_match else text
+    title_match = _TITLE_HEADING_RE.match(text)
+    if not title_match:
+        return None
+    title = title_match.group(1).strip()
+    body = text[title_match.end():]
 
+    summary = ""
+    summary_match = _SUMMARY_LABEL_RE.search(body)
+    if summary_match:
+        summary = summary_match.group(1).strip()
+        body = body[:summary_match.start()] + body[summary_match.end():]
+
+    # FAQs: prefer a raw JSON array embedded directly in the text (more
+    # reliable to parse than Markdown Q&A pairs) if present; fall back to a
+    # "## FAQs"/"**FAQs**" label followed by **Question** / answer pairs.
     faqs = []
-    faq_heading_match = _FAQ_HEADING_RE.search(body)
-    if faq_heading_match:
-        section_start = faq_heading_match.end()
-        next_heading_match = _HEADING_RE.search(body, section_start)
-        section_end = next_heading_match.start() if next_heading_match else len(body)
-        for question, answer in _FAQ_PAIR_RE.findall(body[section_start:section_end]):
-            question = question.strip().strip("*").strip()
-            answer = " ".join(answer.strip().splitlines()).strip()
-            if question and answer:
-                faqs.append({"question": question, "answer": answer})
-        body = body[:faq_heading_match.start()] + body[section_end:]
+    json_match = _FAQ_JSON_RE.search(body)
+    if json_match:
+        try:
+            candidate = json.loads(json_match.group(0))
+            if isinstance(candidate, list) and all(
+                isinstance(item, dict) and "question" in item and "answer" in item for item in candidate
+            ):
+                faqs = candidate
+                body = body[:json_match.start()] + body[json_match.end():]
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-    body = body.strip()
+    faq_label_match = _FAQ_LABEL_RE.search(body)
+    if faq_label_match:
+        if faqs:
+            # JSON array already extracted -- just drop the leftover label line.
+            body = body[:faq_label_match.start()] + body[faq_label_match.end():]
+        else:
+            section_start = faq_label_match.end()
+            next_section_match = _SECTION_BREAK_RE.search(body, section_start)
+            section_end = next_section_match.start() if next_section_match else len(body)
+            for question, answer in _FAQ_PAIR_RE.findall(body[section_start:section_end]):
+                question = question.strip().strip("*").strip()
+                answer = " ".join(answer.strip().splitlines()).strip()
+                if question and answer:
+                    faqs.append({"question": question, "answer": answer})
+            body = body[:faq_label_match.start()] + body[section_end:]
+
+    body = _TRAILING_RULE_RE.sub("\n", body)
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+
     if not title or len(body) < 200:
         return None
 
-    # No separate meta description in this shape -- derive a plausible one
-    # from the opening paragraph rather than leaving it empty.
-    plain_intro = re.sub(r"^##\s+.+$", "", body, count=1, flags=re.MULTILINE)
-    plain_intro = re.sub(r"[#*_`\[\]()]", "", plain_intro).strip()
-    plain_intro = re.sub(r"\s+", " ", plain_intro)
-    summary = plain_intro[:160].rsplit(" ", 1)[0] if len(plain_intro) > 160 else plain_intro
+    if not summary:
+        # No separate meta description in this shape -- derive a plausible
+        # one from the opening paragraph rather than leaving it empty.
+        plain_intro = re.sub(r"^#{2,3}\s+.+$", "", body, count=1, flags=re.MULTILINE)
+        plain_intro = re.sub(r"[#*_`\[\]()]", "", plain_intro).strip()
+        plain_intro = re.sub(r"\s+", " ", plain_intro)
+        summary = plain_intro[:160].rsplit(" ", 1)[0] if len(plain_intro) > 160 else plain_intro
 
     return {
         "status": "success",
