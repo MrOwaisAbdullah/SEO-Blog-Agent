@@ -316,6 +316,11 @@ async def run_brief() -> None:
 
     parsed = _parse_agent_json(output)
     if not parsed:
+        if _looks_like_unexecuted_tool_call(output):
+            raise RuntimeError(
+                "Brief stage failed: model returned an unexecuted tool call instead of a brief "
+                f"(Cohere compatibility-layer glitch, nothing to salvage) -- retry the stage. Raw: {output}"
+            )
         raise RuntimeError(f"Brief stage reported success but produced unparseable output: {output[:300]}")
     _ensure_brief_persisted(parsed)
 
@@ -415,6 +420,25 @@ def _extract_content_from_markdown(output: str) -> Optional[dict]:
     }
 
 
+def _looks_like_unexecuted_tool_call(output: str) -> bool:
+    """Detects a specific, confirmed-live Cohere failure mode: its OpenAI
+    compatibility layer occasionally leaks a tool call it never actually
+    executed as plain-text JSON (e.g. a list of
+    {"tool_call_id", "tool_name", "parameters"} objects) instead of running
+    tavily_search_tool/etc. through the SDK's real function-calling
+    protocol. There's no content to salvage here -- unlike a missing JSON
+    envelope, this genuinely has no post in it -- but flagging the pattern
+    explicitly makes the failure instantly recognizable instead of just
+    dumping the raw JSON as an opaque error."""
+    try:
+        parsed = json.loads(output.strip())
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(parsed, list) and bool(parsed) and all(
+        isinstance(item, dict) and "tool_name" in item for item in parsed
+    )
+
+
 def _ensure_content_persisted(content: dict) -> dict:
     """Same fix as _ensure_brief_persisted, for the Content Generator Agent
     -> generated_posts. Returns the persisted row (existing or freshly
@@ -482,6 +506,11 @@ async def run_content() -> None:
         # returns the finished post as plain text.
         parsed = _extract_content_from_markdown(output)
         if parsed is None:
+            if _looks_like_unexecuted_tool_call(output):
+                raise RuntimeError(
+                    "Content stage failed: model returned an unexecuted tool call instead of "
+                    f"content (Cohere compatibility-layer glitch, no post to salvage) -- retry the stage. Raw: {output}"
+                )
             raise RuntimeError(f"Content stage failed: {output}")
         print("[content] Agent returned raw Markdown instead of the JSON envelope; salvaged it instead of discarding a completed post.")
 
