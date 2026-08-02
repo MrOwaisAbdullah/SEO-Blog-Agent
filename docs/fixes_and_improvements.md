@@ -718,3 +718,54 @@ wasted time/quota on a genuinely broken run roughly in half without
 removing retry coverage entirely -- a single transient hiccup still gets a
 second try, it just stops burning through the whole provider list
 repeatedly for something that isn't transient.
+
+## Sixth (severe) live issue: duplicate Sanity publish from a false-positive retry
+
+The Sanity dataset fix worked -- a real `post` run successfully published
+"DeepSeek V4 Flash 0731: The AI Model That's Changing the Game for $1 a
+Month" to Sanity. But the same run's log showed `DEBUG: Successfully
+converted to 14 Sanity blocks` **twice**, ~70 seconds apart, which meant the
+entire Preparation -> Contextual Image Insertion -> Posting chain ran
+twice for the same post -- and `SanityAdapter.create_document` uses a plain
+`{"create": document}` mutation with no `_id` set and no dedup-by-slug
+check, so a second run creates a genuinely separate, duplicate document in
+Sanity, not a harmless no-op. **If you're reading this, check Sanity
+Studio for a duplicate of that post and delete the extra one if present --
+this was flagged to the user directly when found, but noting it here too
+in case it's missed.**
+
+Root cause: `run_posting_workflow`'s Posting Agent retry loop (same file as
+the marker-fragility fix earlier) checked `if "error" not in
+str(posting_result).lower()`. The actual run's Posting Agent successfully
+published to Sanity, then hit an unrelated, genuine bug trying to mark the
+sheet's `Published` column (`update_cells` called with a malformed
+sheet-qualified range like `'generated_posts'!Published`, which isn't valid
+A1 notation), and its final summary text read: *"...successfully published
+to Sanity CMS... but I encountered an **error** when trying to update the
+'Published' column..."* -- containing the literal word "error" for a
+sub-task, which the check couldn't distinguish from an actual publish
+failure. It retried the whole workflow, calling `post_to_sanity_tool` a
+second time.
+
+This is the same "don't trust `'error' in str(...)`" lesson as everywhere
+else in this doc, but the highest-stakes instance of it so far -- the
+earlier false positives caused a misreported CI status or a wasted retry;
+this one created real, duplicate public content.
+
+Fixed with `_sanity_publish_already_succeeded()`: instead of parsing the
+agent's narrative text, it inspects the `RunResult.new_items` for the
+actual `tool_call_output_item` from `post_to_sanity_tool` itself (matched
+by its distinctive `{"status", "post_id"}` key shape, which no other tool
+this agent uses returns) and trusts that directly. The retry loop now
+checks this first, before falling back to the text-based check only when
+no Sanity tool-call output exists at all (e.g. the agent never called it).
+Also fixed the actual sheet-update bug that triggered this in the first
+place: the Posting Agent's instructions now spell out the exact
+`find_row_by_key` -> `get_range` (header lookup) -> `update_cell` sequence
+with explicit row/col indices instead of leaving "update the Published
+column" to the model's own judgment about which tool action to use, and
+explicitly say a sheet-update failure after a successful publish should be
+reported as a warning, not worded as an "error" -- a secondary,
+lower-confidence mitigation on top of the deterministic code fix, since
+prompt wording alone has repeatedly not been reliable enough on its own
+this session.

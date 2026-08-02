@@ -189,8 +189,11 @@ posting_agent = Agent(
          - alt_text: the extracted ALT_TEXT
          - faqs: the extracted FAQS (as a JSON list)
     4. After successful posting, update the Google Sheet:
-       - Find the row in "generated_posts" worksheet using SOURCE_KEYWORD_TOPIC to match "Title" column
-       - Update the "Published" column for that row to "Yes"
+       - Use `manage_sheet_data_tool` with action="find_row_by_key", worksheet_name="generated_posts", key_column="Title", key_value=SOURCE_KEYWORD_TOPIC to get the row_index.
+       - Use `manage_sheet_data_tool` with action="get_range", worksheet_name="generated_posts", cell_range="1:1" to get the header row, and find the 1-based index of the "Published" column within it.
+       - Use `manage_sheet_data_tool` with action="update_cell", worksheet_name="generated_posts", row_index=[row_index from find_row_by_key], col_index=[Published column index], data="Yes".
+       - Do NOT use action="update_cells" or pass a sheet-qualified range like "'generated_posts'!Published" as cell_range -- that is not valid A1 notation and will fail. Use action="update_cell" with row_index/col_index as described above.
+       - If this sheet update fails after retries, that is NOT a reason to report the overall task as failed -- the blog post was already published to Sanity, which is the outcome that matters. Note the sheet-update failure as a warning in your final answer, but do not use the word "error" to describe it, and clearly state that the Sanity publish itself succeeded.
     5. Record in published_posts worksheet:
        - Add a new row to "published_posts" worksheet with:
          - Keyword/Topic: SOURCE_KEYWORD_TOPIC
@@ -257,6 +260,32 @@ def _build_post_data_block(fields: Dict[str, str]) -> str:
         lines.append(f"{key}: {value}")
     lines.append("=== POST_DATA_END ===")
     return "\n".join(lines)
+
+
+def _sanity_publish_already_succeeded(run_result) -> bool:
+    """Confirmed live: `if "error" not in str(posting_result).lower()` treated
+    a successful Sanity publish as a failure because the agent's own summary
+    text mentioned an unrelated sheet-update sub-error ("...published to
+    Sanity CMS. I ... encountered an error when trying to update the
+    'Published' column..."). That triggered a full-workflow retry, which
+    re-ran post_to_sanity_tool and created a SECOND Sanity document for the
+    same post -- create_document has no idempotency/dedup by slug, so any
+    unnecessary retry after a real publish is a duplicate-publish risk, not
+    just a wasted API call.
+
+    Instead of parsing narrative text, inspect the actual tool_call_output
+    items in the RunResult for post_to_sanity_tool's own return value
+    (identified by its distinctive {"status", "post_id"} key pair -- no
+    other tool this agent uses returns that shape) and trust that instead of
+    whatever the model said about it afterwards."""
+    new_items = getattr(run_result, "new_items", None) or []
+    for item in new_items:
+        if getattr(item, "type", None) != "tool_call_output_item":
+            continue
+        output = getattr(item, "output", None)
+        if isinstance(output, dict) and "post_id" in output and "status" in output:
+            return output.get("status") == "success"
+    return False
 
 
 # --- Function Flow Definition ---
@@ -440,6 +469,14 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                         max_turns=max_turns,
                     )
                     
+                    # Check the actual post_to_sanity_tool output first --
+                    # if Sanity already has the post, nothing here should
+                    # ever trigger a retry, since a retry means calling
+                    # post_to_sanity_tool (and create_document, which has no
+                    # dedup) a second time for the same post.
+                    if _sanity_publish_already_succeeded(posting_result):
+                        logger.info("Posting Agent completed successfully (Sanity publish confirmed via tool output)")
+                        break
                     if "error" not in str(posting_result).lower():
                         logger.info("Posting Agent completed successfully")
                         break
@@ -447,14 +484,17 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                         logger.warning(f"Posting Agent failed on attempt {attempt + 1}: {str(posting_result)}")
                 except Exception as e:
                     logger.warning(f"Posting Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-                
+
                 if attempt < max_retries - 1:  # Don't sleep on the last attempt
                     await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-            if posting_result is None or "error" in str(posting_result).lower():
+            if posting_result is None:
                 logger.error(f"Posting Agent failed after {max_retries} attempts")
                 return {"status": "error", "error": f"Posting Agent failed after {max_retries} attempts: {str(posting_result)}"}
-            
+            if not _sanity_publish_already_succeeded(posting_result) and "error" in str(posting_result).lower():
+                logger.error(f"Posting Agent failed after {max_retries} attempts")
+                return {"status": "error", "error": f"Posting Agent failed after {max_retries} attempts: {str(posting_result)}"}
+
             posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
 
             logger.info("Posting workflow completed.")
