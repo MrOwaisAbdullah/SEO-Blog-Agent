@@ -40,7 +40,7 @@ from agents.run import set_default_agent_runner
 from blog_agent.blog_agents import brief_agent, content_generator_agent
 from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.posting_agent import run_posting_workflow
-from blog_agent.research_agent import combined_research_workflow
+from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
 from tools.sheet_tool import manage_sheet_data
 
 MAX_TURNS = 30
@@ -214,6 +214,33 @@ def _notify_discord_status(stage: str, success: bool, detail: str = "") -> None:
         print(f"Failed to send Discord status notification: {e}")
 
 
+def _notify_discord_topic_candidates(candidates: list) -> None:
+    """Posts each trending-topic candidate as its OWN message so it can carry
+    its own ✅/❌ reaction, same granular approval pattern as draft posts. The
+    bot matches a reaction back to a candidate by the "**Candidate Topic:**"
+    line (parallel to how draft approvals match on "**Title:**"), so that
+    line's format must stay exactly as-is."""
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
+        print("DISCORD_WEBHOOK_URL not set; skipping topic candidate notification.")
+        return
+    for candidate in candidates:
+        topic = str(candidate.get("topic", "")).strip()
+        rationale = str(candidate.get("rationale", "")).strip()
+        if not topic:
+            continue
+        content = (
+            "**New Topic Candidate**\n\n"
+            f"**Candidate Topic:** {topic}\n"
+            f"**Why now:** {rationale}\n\n"
+            "React with ✅ to add this to the research queue, or ❌ to skip it."
+        )
+        try:
+            _post_discord_message(webhook_url, content)
+        except Exception as e:
+            print(f"Failed to send Discord topic candidate notification for '{topic}': {e}")
+
+
 async def run_research() -> None:
     result = await combined_research_workflow(
         LLM_MODELS=custom_runner.LLM_MODELS,
@@ -225,6 +252,24 @@ async def run_research() -> None:
     print(f"[research] result: {result}")
     if isinstance(result, dict) and "error" in result:
         raise RuntimeError(f"Research stage failed: {result['error']}")
+
+    if isinstance(result, dict) and result.get("status") == "no_available_keywords":
+        # Nothing queued in ContentSpark_Keywords -- rather than just doing
+        # nothing until someone manually adds a topic, look for what's
+        # actually being discussed right now and propose it for approval.
+        print("[research] No available keywords; running topic discovery instead.")
+        await run_discover_topics()
+
+
+async def run_discover_topics() -> None:
+    result = await run_topic_discovery_workflow()
+    print(f"[discover_topics] result: {result}")
+    if result.get("status") == "error":
+        raise RuntimeError(f"Topic discovery failed: {result.get('error')}")
+    if result.get("status") == "no_candidates_found" or not result.get("candidates"):
+        print("[discover_topics] No current topic candidates found.")
+        return
+    _notify_discord_topic_candidates(result["candidates"])
 
 
 def _ensure_brief_persisted(brief: dict) -> None:
@@ -535,6 +580,7 @@ STAGE_HANDLERS = {
     "brief": run_brief,
     "content": run_content,
     "post": run_post,
+    "discover_topics": run_discover_topics,
 }
 
 

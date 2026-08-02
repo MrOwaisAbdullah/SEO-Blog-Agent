@@ -581,3 +581,77 @@ because Actions' `${{ secrets.X }}` syntax never errors on an unset secret
 -- it silently substitutes an empty string. Anywhere in this codebase that
 does `os.environ.get(key, default)` for an *optional* secret should really
 be `os.environ.get(key) or default`.
+
+## Fifth live issue: garbage "N/A" rows written to research_data on an empty keyword queue
+
+Real failure: `research_data` gained a row where every field was `N/A`
+except Content Summary, which was the sentence *"I'm sorry, I cannot
+conduct research without a keyword or URL. Please provide a valid keyword
+or URL to proceed with the research."* -- an LLM refusal, saved as if it
+were a real research finding.
+
+Root cause: `combined_research_workflow` (`blog_agent/research_agent.py`)
+runs three agents in sequence -- Triage (picks a keyword from
+`ContentSpark_Keywords`) -> Researcher -> Output (writes to
+`research_data`) -- and each step's retry loop only checked `"error" not in
+str(result)` to decide whether the step "succeeded". When
+`ContentSpark_Keywords` is empty, `get_keyword_tool` returns `{"error": "No
+available keywords found"}`, but the Triage Agent (an LLM) doesn't relay
+that literally -- it paraphrases it as a polite sentence with no literal
+"error" substring, which passes the check. That empty/apologetic text then
+gets handed to the Researcher Agent as "the keyword to research", which
+correctly recognizes it has nothing to research and says so in its own
+apology -- which *also* doesn't contain the word "error", so it passes the
+check too, and the Output Agent dutifully writes that apology into the
+sheet since that's literally what it was asked to consolidate.
+
+Fixed with `_looks_like_refusal_or_empty()`: checks the Triage Agent's
+output (before it's ever sent to the Researcher) and the Researcher
+Agent's output (before it's ever sent to the Output Agent) against a set of
+refusal-phrase markers and an empty/too-short check, short-circuiting to
+`{"status": "no_available_keywords", ...}` at either point instead of
+letting a refusal propagate all the way to a sheet write. This is the same
+"don't trust a naive `'error' in str(...)` substring check" lesson as the
+false-positive fix earlier in this doc, just living in a different file
+(`research_agent.py`'s own retry loops were never touched when
+`scripts/run_stage.py`'s equivalent bug was fixed).
+
+## Added: automatic trending-topic discovery when the keyword queue is empty
+
+Previously, an empty `ContentSpark_Keywords` queue just meant nothing
+happened until someone manually added a topic (via `/add_topic` or editing
+the sheet by hand). Per the user's request, `run_research()` now reacts to
+an empty queue by running a new **Topic Discovery Agent**
+(`run_topic_discovery_workflow()` in `blog_agent/research_agent.py`)
+instead of just stopping:
+
+- Uses `get_author_context_tool` to confirm the brand's actual current
+  focus areas (from the live `owaisabdullah.dev/api/profile` data added
+  earlier this session) rather than assuming a fixed niche.
+- Runs several targeted `tavily_search_tool` queries (`site:reddit.com
+  ...`, `site:quora.com ...`, `"... trending this week"`) to find what's
+  actually being discussed right now, not generic evergreen topics.
+- Returns 3-5 specific candidates, each with a one-sentence rationale
+  citing what was actually found.
+
+Candidates are **never** written directly to the sheet -- each is posted to
+Discord as its own message (`_notify_discord_topic_candidates` in
+`scripts/run_stage.py`) with its own ✅/❌ reaction, mirroring the existing
+draft-approval pattern. `discord_bot/bot.py`'s reaction handler now
+recognizes a `**Candidate Topic:**` line (parallel to how it already
+recognizes `**Title:**` for drafts) and calls the existing `add_keyword()`
+helper on approval, which is the same function `/add_topic` already uses --
+so an approved candidate lands in `ContentSpark_Keywords` exactly like a
+manually-submitted topic would, ready for the next `research` run to pick
+up normally.
+
+Also added as its own on-demand stage (`discover_topics`), independent of
+an empty queue, so topic discovery can be triggered manually rather than
+only reactively:
+- New `workflow_dispatch` choice in `.github/workflows/pipeline.yml`.
+- New `discover_topics` entry in `discord_bot/bot.py`'s `/run` command
+  choices -- `/run discover_topics` in Discord fires it the same way `/run
+  research`/`/run content`/etc. already do.
+
+No new secrets or services needed -- reuses Tavily (already configured) and
+the same Discord webhook/bot wiring already in place.

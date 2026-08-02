@@ -1,9 +1,11 @@
 from typing import Optional, Dict
+import json
 import logging
 import re
 import asyncio
 from agents import Agent, function_tool, ModelSettings
 from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
+from tools.tools import get_author_context_tool
 from blog_agent.hooks import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
@@ -13,6 +15,32 @@ from blog_agent.custom_runner import FallbackAgentRunner
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Phrases that show up when an agent politely declines instead of doing its
+# job (e.g. the Triage Agent got an empty-queue tool result and the
+# Researcher Agent then got nothing usable to research). None of these
+# contain the literal word "error", so the existing `"error" not in
+# str(result)` retry-loop checks below treat them as a *success* -- that's
+# how a real production run ended up with an apology sentence written into
+# research_data as if it were a research finding (columns full of "N/A" and
+# "I'm sorry, I cannot conduct research without a keyword or URL...").
+_REFUSAL_MARKERS = (
+    "i'm sorry",
+    "i am sorry",
+    "cannot conduct research",
+    "without a keyword or url",
+    "please provide a valid keyword",
+    "no keyword or url",
+    "unable to conduct research",
+)
+
+
+def _looks_like_refusal_or_empty(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 3:
+        return True
+    lowered = stripped.lower()
+    return any(marker in lowered for marker in _REFUSAL_MARKERS)
 
 async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS, max_retries: int = 3) -> Dict[str, Optional[str]]:
     """
@@ -265,6 +293,18 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
 
     input_string = triage_result.final_output if hasattr(triage_result, 'final_output') else str(triage_result)  # The output is a single string
 
+    # An empty ContentSpark_Keywords queue makes get_keyword_tool return an
+    # error dict, but the Triage Agent then just relays that as a polite
+    # sentence ("No keywords are currently available...") -- which doesn't
+    # contain the literal word "error", so the check above lets it through
+    # as a "success". Stop here instead of handing that non-answer to the
+    # Researcher Agent, which would otherwise research nothing and the
+    # Output Agent would then write an "N/A" row full of an apology
+    # sentence straight into research_data (confirmed live in production).
+    if _looks_like_refusal_or_empty(input_string):
+        logger.info("Triage Agent found no available keyword; skipping research this run.")
+        return {"status": "no_available_keywords", "message": "No available keywords found in ContentSpark_Keywords."}
+
     # Step 2: For now, always use the Researcher Agent regardless of input type
     # (youtube_research_agent is commented out)
     research_agent = researcher_agent
@@ -296,6 +336,15 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     if research_result is None or "error" in str(research_result):
         return {"error": f"Research Agent failed after {max_retries} attempts: {str(research_result)}"}
 
+    # Belt-and-suspenders version of the same check as above: if the
+    # Researcher Agent itself declined (e.g. it somehow still got a
+    # placeholder/empty input), don't let the Output Agent write that
+    # refusal into the sheet as if it were a real finding.
+    research_output_text = str(getattr(research_result, "final_output", research_result))
+    if _looks_like_refusal_or_empty(research_output_text):
+        logger.info("Researcher Agent declined to research an empty/invalid input; skipping this run.")
+        return {"status": "no_available_keywords", "message": "Researcher Agent had nothing usable to research."}
+
     # Step 4: Run Output Agent with research results with retry logic
     output_input = f"Here are the research findings that need to be consolidated into the research_data worksheet:\n\n{str(research_result)}\n\nPlease process these findings and add them to the worksheet using efficient data handling - append rows directly without loading all existing data."
     
@@ -324,3 +373,93 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         return {"error": f"Output Agent failed after {max_retries} attempts: {str(output_result)}"}
 
     return output_result
+
+
+async def run_topic_discovery_workflow(max_retries: int = 3, max_turns: int = 20) -> Dict:
+    """Finds fresh topic candidates from current trending discussions (Reddit,
+    Quora, general web) when ContentSpark_Keywords is empty, instead of the
+    pipeline just doing nothing until someone manually adds a keyword.
+    Candidates are NOT written to the sheet directly -- they're returned for
+    the caller to post to Discord for approval (same human-in-the-loop
+    pattern as draft posts), and only get added to ContentSpark_Keywords via
+    the bot's reaction handler once approved. Also triggerable on demand via
+    a dedicated pipeline stage / Discord command, independent of an empty
+    queue.
+    """
+    custom_runner = FallbackAgentRunner()
+
+    topic_discovery_agent = Agent(
+        name="Topic Discovery Agent",
+        instructions="""
+        **Role:** You find fresh, specific blog topic candidates from what people are
+        actually asking/discussing right now, for a brand focused on web development,
+        AI agents, and automation (use `get_author_context_tool` to confirm the current
+        focus areas, skills, and niche -- do not assume, read it from the tool).
+
+        **Process:**
+        1. Call `get_author_context_tool` to understand the brand's actual current focus
+           (skills, current_roles, key_highlights from `live_profile`).
+        2. Run several `tavily_search_tool` queries targeting real current discussions,
+           not generic evergreen topics:
+           - `"site:reddit.com <niche> 2026"` (e.g. "site:reddit.com AI agents developers 2026")
+           - `"site:quora.com <niche> questions"`
+           - `"<niche> trending this week"`
+           Run at least 3 different queries covering different angles of the niche.
+        3. From the results, identify 3-5 SPECIFIC, concrete topic candidates -- not vague
+           themes. Each must be something a developer/founder is actually asking about
+           right now, evidenced by what you found (a real thread title, a real recurring
+           question, a real recent release/announcement people are discussing).
+        4. For each candidate, write a one-sentence rationale citing what you found
+           (e.g. "Multiple Reddit threads this week ask how to handle OpenAI Agents SDK
+           tool-call retries -- no clear guide exists yet").
+
+        **Output (JSON only, no markdown fence needed):**
+        {
+          "status": "success",
+          "candidates": [
+            {"topic": "specific topic phrased as a keyword/title", "rationale": "why this, right now"},
+            ...
+          ]
+        }
+        If you cannot find anything genuinely current (all searches return only generic
+        evergreen content), return: {"status": "no_candidates_found", "candidates": []}
+        """,
+        tools=[tavily_search_tool, web_search_tool, get_author_context_tool],
+        hooks=MyAgentHooks(),
+        model=custom_runner.get_model_by_name("gemini-flash-latest"),
+        model_settings=ModelSettings(temperature=0.6),
+    )
+
+    result = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Running Topic Discovery Agent (attempt {attempt + 1}/{max_retries})...")
+            result = await custom_runner.run_with_fallback(
+                topic_discovery_agent,
+                "Find current, specific blog topic candidates for this brand's niche.",
+                max_turns=max_turns,
+            )
+            output_text = str(getattr(result, "final_output", result))
+            if not _looks_like_refusal_or_empty(output_text):
+                logger.info("Topic Discovery Agent completed successfully")
+                break
+        except Exception as e:
+            logger.warning(f"Topic Discovery Agent failed on attempt {attempt + 1} with exception: {str(e)}")
+        if attempt < max_retries - 1:
+            await asyncio.sleep(2 ** attempt)
+
+    if result is None:
+        return {"status": "error", "error": f"Topic Discovery Agent failed after {max_retries} attempts."}
+
+    output_text = str(getattr(result, "final_output", result))
+    fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", output_text, re.DOTALL)
+    json_text = fence_match.group(1) if fence_match else output_text.strip()
+    try:
+        parsed = json.loads(json_text)
+    except (json.JSONDecodeError, TypeError):
+        return {"status": "error", "error": f"Topic Discovery Agent produced unparseable output: {output_text[:300]}"}
+
+    candidates = parsed.get("candidates", []) if isinstance(parsed, dict) else []
+    if not candidates:
+        return {"status": "no_candidates_found", "candidates": []}
+    return {"status": "success", "candidates": candidates}

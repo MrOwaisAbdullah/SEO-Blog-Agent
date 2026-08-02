@@ -324,6 +324,22 @@ Content over Google Sheets' 50,000-character cell limit is truncated, with a
 warning in the bot's reply. There's no dedup check — submitting the same
 topic twice adds it twice.
 
+### 8. Automatic topic discovery when the queue is empty
+
+If `ContentSpark_Keywords` has no `available` rows, the `research` stage no
+longer just does nothing — it automatically runs a Topic Discovery Agent
+that searches Reddit, Quora, and the general web for what's currently being
+discussed in the brand's niche, and posts 3-5 candidate topics to Discord,
+each as its own message with its own ✅/❌ reaction. Approving one adds it to
+`ContentSpark_Keywords` exactly like `/add_topic` would; rejecting just
+skips it — nothing is added either way until you react.
+
+This can also be triggered manually, independent of an empty queue, via
+`/run discover_topics` in Discord (or `workflow_dispatch` → stage
+`discover_topics` from the Actions tab). No new secrets are needed — it
+reuses the same Tavily and Discord webhook configuration already set up
+above.
+
 ## Corrections to README.md
 
 The original README's `.env` template listed a few things that don't match the

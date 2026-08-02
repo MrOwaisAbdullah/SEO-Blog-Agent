@@ -69,7 +69,7 @@ KEYWORDS_SPREADSHEET_NAME = "ContentSpark_Keywords"
 # rather than hitting that exactly.
 MAX_KEYWORD_CELL_LENGTH = 49000
 
-STAGE_CHOICES = ["research", "brief", "content", "post"]
+STAGE_CHOICES = ["research", "brief", "content", "post", "discover_topics"]
 
 # Discord's gateway sends heartbeat-related traffic roughly every ~41s by
 # default, so 120s of complete silence on the socket is a strong "connection
@@ -147,6 +147,13 @@ def _extract_title(message_content: str):
     return None
 
 
+def _extract_candidate_topic(message_content: str):
+    for line in message_content.splitlines():
+        if line.startswith("**Candidate Topic:**"):
+            return line.removeprefix("**Candidate Topic:**").strip()
+    return None
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -217,6 +224,21 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
     message = await channel.fetch_message(payload.message_id)
+
+    candidate_topic = _extract_candidate_topic(message.content)
+    if candidate_topic:
+        if emoji == "❌":
+            await channel.send(f"❌ Skipped topic candidate: **{candidate_topic}**")
+            return
+        try:
+            add_keyword(candidate_topic)
+        except Exception as e:
+            logger.exception("Failed to add topic candidate %r", candidate_topic)
+            await channel.send(f"⚠️ Failed to add **{candidate_topic}** to the research queue: {e}")
+            return
+        await channel.send(f"✅ Added **{candidate_topic}** to the research queue.")
+        return
+
     title = _extract_title(message.content)
     if not title:
         return
