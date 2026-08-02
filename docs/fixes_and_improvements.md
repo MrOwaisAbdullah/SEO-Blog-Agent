@@ -1109,3 +1109,34 @@ just pile up unreviewed candidates faster than they could reasonably be
 approved. Added `cron: '0 1 */2 * *'` (~every 2 days, 6:00 AM PKT, an hour
 before `research`) to `.github/workflows/pipeline.yml`, with the matching
 case-statement entry mapping that schedule to `stage=discover_topics`.
+
+## Fixed: false-positive Preparation Agent failure aborted the `post` stage
+
+Confirmed live: a real `post` stage run produced a fully valid
+`POST_DATA_START...END` block from the Preparation Agent (full content,
+Pexels fallback image after Gemini vision quota was exhausted) on both
+attempts, yet `run_posting_workflow` reported `"Preparation Agent failed
+after 2 attempts"` and aborted the whole stage.
+
+Root cause: the retry-success check was `if "error" not in
+str(preparation_result).lower()`, which stringifies the *entire* RunResult
+-- including every intermediate tool call, not just the final output. The
+first `manage_sheet_data_tool` call in that run failed Pydantic validation
+(the model passed the literal string `"null"` instead of omitting
+`row_values`/`col_values`/`col_index`), producing a tool-output string
+containing `"Error: Invalid JSON input..."`. The agent immediately retried
+the tool call correctly and produced a complete, correct POST_DATA block --
+but that earlier, self-recovered tool error was still present in
+`str(RunResult)`, so the naive substring check flagged the whole attempt as
+failed anyway. Same bug class as `_sanity_publish_already_succeeded`
+(already fixed earlier this session for the Posting Agent's Sanity check),
+just never applied to the Preparation/Contextual Image Insertion Agent
+checks.
+
+Added `_prep_or_contextual_succeeded(run_result)` in
+`blog_agent/posting_agent.py`, which checks only `run_result.final_output`
+for the `=== POST_DATA_START ===`/`=== POST_DATA_END ===` markers (or the
+`NO_POSTS_FOUND` markers, for the empty-queue case) instead of scanning the
+full RunResult repr. Wired into both the Preparation Agent and Contextual
+Image Insertion Agent retry loops, replacing the `"error" not in
+str(...)` checks there.

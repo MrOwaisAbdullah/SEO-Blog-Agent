@@ -306,6 +306,31 @@ def _extract_sanity_tool_output(run_result) -> Optional[dict]:
     return None
 
 
+def _run_result_final_text(run_result) -> str:
+    final_output = getattr(run_result, "final_output", None)
+    if final_output is not None:
+        return final_output if isinstance(final_output, str) else str(final_output)
+    return str(run_result)
+
+
+def _prep_or_contextual_succeeded(run_result) -> bool:
+    """Confirmed live: `"error" not in str(preparation_result).lower()` treated
+    a fully successful Preparation Agent run as a failure, because str(RunResult)
+    includes every intermediate tool_call_output_item -- not just the final
+    output. A transient, self-recovered manage_sheet_data_tool validation error
+    early in the run (the agent retried and got a valid POST_DATA block) still
+    made the whole attempt look like a failure, so a good run got discarded and
+    retried until it hit max_retries and the stage aborted. Same bug class as
+    _sanity_publish_already_succeeded below -- check only the agent's actual
+    final output text for the markers that indicate real success, not the
+    RunResult's full repr."""
+    final_text = _run_result_final_text(run_result)
+    if "=== POST_DATA_START ===" in final_text and "=== POST_DATA_END ===" in final_text:
+        return True
+    lowered = final_text.lower()
+    return "no_posts_found" in lowered or "no approved, unpublished posts found" in lowered
+
+
 def _sanity_publish_already_succeeded(run_result) -> bool:
     """Confirmed live: `if "error" not in str(posting_result).lower()` treated
     a successful Sanity publish as a failure because the agent's own summary
@@ -356,18 +381,18 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                         max_turns=max_turns
                     )
                     
-                    if "error" not in str(preparation_result).lower():
+                    if _prep_or_contextual_succeeded(preparation_result):
                         logger.info("Preparation Agent completed successfully")
                         break
                     else:
                         logger.warning(f"Preparation Agent failed on attempt {attempt + 1}: {str(preparation_result)}")
                 except Exception as e:
                     logger.warning(f"Preparation Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-                
+
                 if attempt < max_retries - 1:  # Don't sleep on the last attempt
                     await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-            if preparation_result is None or "error" in str(preparation_result).lower():
+            if preparation_result is None or not _prep_or_contextual_succeeded(preparation_result):
                 logger.error(f"Preparation Agent failed after {max_retries} attempts")
                 return {"status": "error", "error": f"Preparation Agent failed after {max_retries} attempts: {str(preparation_result)}"}
 
@@ -452,18 +477,18 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                         max_turns=max_turns,
                     )
                     
-                    if "error" not in str(contextual_result).lower():
+                    if _prep_or_contextual_succeeded(contextual_result):
                         logger.info("Contextual Image Insertion Agent completed successfully")
                         break
                     else:
                         logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1}: {str(contextual_result)}")
                 except Exception as e:
                     logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-                
+
                 if attempt < max_retries - 1:  # Don't sleep on the last attempt
                     await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-            if contextual_result is None or "error" in str(contextual_result).lower():
+            if contextual_result is None or not _prep_or_contextual_succeeded(contextual_result):
                 logger.error(f"Contextual Image Insertion Agent failed after {max_retries} attempts")
                 return {"status": "error", "error": f"Contextual Image Insertion Agent failed after {max_retries} attempts: {str(contextual_result)}"}
 
