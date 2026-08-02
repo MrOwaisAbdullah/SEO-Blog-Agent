@@ -280,17 +280,25 @@ content_generator_agent = Agent(
     - Summary (SEO-friendly meta description, 50–160 characters, must include the primary keyword and accurately summarize the page)
         - Approve/Disapprove ("Approved")  
         - Published ("No")  
-    - The generated_posts worksheet has the following columns in order: Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published
-    - Example tool call:  
+    - The generated_posts worksheet has EXACTLY 7 columns, in this order: Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published.
+      `row_values` MUST be a list of EXACTLY 7 strings in that exact order -- never fewer, never more, never reordered. A `row_values` list with the wrong number of elements silently shifts every value after the gap into the wrong column (e.g. a 5-element list puts the Published value into the Summary column instead of failing loudly) -- there is no validation on the sheet side, so getting this list right is entirely on you.
+    - Example tool call (7 elements in row_values, matching the 7 columns 1-for-1):
         {
         "worksheet_name": "generated_posts",
         "action": "append_row",
-        "row_values": ["best coffee maker 2025", "# Best Coffee Makers 2025...
-    ## Introduction...
-    Nespresso excels, per [Coffee Review](https://coffeereview.com)...", "[{"question": "Can a coffee maker save time?", "answer": "Yes, models like Nespresso..."}]", "92", "Generated", "", "No"]
+        "row_values": [
+          "best coffee maker 2025",
+          "## Introduction\n\nNespresso excels, per [Coffee Review](https://coffeereview.com)...",
+          "[{\"question\": \"Can a coffee maker save time?\", \"answer\": \"Yes, models like Nespresso...\"}]",
+          "92",
+          "Discover the best coffee makers of 2025, tested for speed, flavor, and value.",
+          "Approved",
+          "No"
+        ]
             }
     - IMPORTANT: All values in `row_values` must be strings, including numbers like Quality Score. Convert integers to strings (e.g., `92` should be `"92"`).
     - IMPORTANT: When using the Quality Score from the content evaluation agent's response, make sure to convert it from integer to string before adding to `row_values`. For example, if the evaluation agent returns `"Quality Score": 92`, convert it to `"92"` when constructing the `row_values` array.
+    - Before calling the tool, count the elements in your `row_values` list and confirm it is exactly 7, in the exact column order above.
     - Retry up to 3 times with 5-second delays; if it fails, include:  
         { "errors": ["Failed to save to generated_posts after 3 attempts"] }
 

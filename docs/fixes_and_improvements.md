@@ -923,3 +923,46 @@ not the source of truth for whether a stage succeeded -- the actual tool
 call outputs are.** Every "false failure" and "false success" bug fixed in
 this document came from trusting narrative text (JSON or not) over what
 the tools actually returned.
+
+## Fixed: values landing in the wrong `generated_posts` column
+
+User report: the `generated_posts` sheet had a row where the **Summary**
+column held `"Yes"` -- a value that clearly belongs in **Published**, two
+columns over. Root cause: when the Content Generator Agent calls
+`manage_sheet_data_tool` with `action="append_row"` **itself** (not
+through `_ensure_content_persisted`'s deterministic fallback), the tool has
+no way to validate the semantic shape of the `row_values` list it's
+handed -- it just writes whatever list it gets, positionally. If the agent
+passes a list with too few elements (e.g. skipping `Summary` and
+`Approve/Disapprove`), gspread's `get_all_records()` (keyed by the real
+header row) silently maps every value after the gap one or more columns to
+the left -- no error, no validation, just data in the wrong place.
+
+Two contributing causes fixed together:
+
+1. **The few-shot example in `content_generator_agent`'s own prompt
+   (`blog_agent/blog_agents.py`) was itself wrong.** It showed a
+   `row_values` example with `"Generated"` and `""` sitting where `Summary`
+   and `Approve/Disapprove` should be -- stale leftovers from what looks
+   like an earlier column scheme, directly contradicting the "columns in
+   order" line one line above it. LLMs weight examples heavily; a wrong
+   example is a plausible direct cause of a model reproducing the wrong
+   shape. Replaced it with a correct, fully-populated 7-element example,
+   and added an explicit instruction to count `row_values` before calling
+   the tool and confirm it's exactly 7 elements in the documented order.
+2. **`_ensure_content_persisted` previously trusted any existing row
+   unconditionally** once it found one matching the title ("agent saved it
+   correctly", return as-is) -- no shape validation at all. Added
+   `_row_looks_malformed()`: flags a row whose `Summary` value is literally
+   `"yes"`/`"no"` (a dead giveaway it's actually holding the `Published`
+   value) or whose `Published` is empty. When flagged, the row is now
+   **repaired in place** -- each of the 7 fields is written individually
+   via `update_cell`, looked up by the real header row's column *name* (not
+   assumed position), using the correctly-extracted values from the
+   already-parsed `content` dict -- rather than trusting whatever the
+   agent's own malformed `append_row` call had produced.
+
+This only self-heals a title if/when the `content` stage processes it
+(or reprocesses it) again -- it does not retroactively scan and fix every
+row already in the sheet. If other rows are affected, they'd need a manual
+check or a one-off audit pass; ask if that's wanted.

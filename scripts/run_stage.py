@@ -525,31 +525,13 @@ def _looks_like_unexecuted_tool_call(output: str) -> bool:
     )
 
 
-def _ensure_content_persisted(content: dict) -> dict:
-    """Same fix as _ensure_brief_persisted, for the Content Generator Agent
-    -> generated_posts. Returns the persisted row (existing or freshly
-    appended) so the caller can use it directly for the Discord notification
-    instead of blindly trusting "last row = the one just generated", which
-    would silently notify about a stale row if the agent hadn't actually
-    saved anything."""
-    title = str(_get_field(content, "Title")).strip()
-    if not title:
-        raise RuntimeError(f"Content output missing Title; cannot persist or verify. Keys seen: {list(content.keys())}")
+_GENERATED_POSTS_FIELDS = ["Title", "Generated Content", "FAQs", "Quality Score", "Summary", "Approve/Disapprove", "Published"]
 
-    existing = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
-    existing_row = None
-    if existing.get("status") == "success":
-        for row in existing.get("data", []):
-            if str(_get_field(row, "Title")).strip() == title:
-                existing_row = row
 
-    if existing_row:
-        print(f"[content] generated_posts already has a row for '{title}'; agent saved it correctly.")
-        return existing_row
-
+def _content_row_values(content: dict, title: str) -> dict:
     faqs = _get_field(content, "FAQs", [])
     faqs_str = faqs if isinstance(faqs, str) else json.dumps(faqs)
-    row_values = {
+    return {
         "Title": title,
         "Generated Content": str(_get_field(content, "Generated Content")),
         "FAQs": faqs_str,
@@ -558,6 +540,70 @@ def _ensure_content_persisted(content: dict) -> dict:
         "Approve/Disapprove": str(_get_field(content, "Approve/Disapprove", "Approved")),
         "Published": str(_get_field(content, "Published", "No")),
     }
+
+
+def _row_looks_malformed(existing_row: dict) -> bool:
+    """Detects a shifted-columns row: confirmed live, a generated_posts row
+    had "Yes" sitting in the Summary column with Published itself empty --
+    the Content Generator Agent's own append_row tool call passed too few
+    values (skipping Summary and/or Approve/Disapprove), and since
+    append_row just writes whatever list it's given positionally, gspread
+    mapped everything after the gap one or more columns to the left. A
+    meta-description-shaped Summary should never literally be "yes"/"no",
+    and Published should never be empty once a row exists."""
+    summary_value = str(_get_field(existing_row, "Summary", "")).strip().lower()
+    published_value = str(_get_field(existing_row, "Published", "")).strip()
+    return summary_value in ("yes", "no") or not published_value
+
+
+def _ensure_content_persisted(content: dict) -> dict:
+    """Same fix as _ensure_brief_persisted, for the Content Generator Agent
+    -> generated_posts. Returns the persisted row (existing, repaired, or
+    freshly appended) so the caller can use it directly for the Discord
+    notification instead of blindly trusting "last row = the one just
+    generated", which would silently notify about a stale row if the agent
+    hadn't actually saved anything."""
+    title = str(_get_field(content, "Title")).strip()
+    if not title:
+        raise RuntimeError(f"Content output missing Title; cannot persist or verify. Keys seen: {list(content.keys())}")
+
+    existing = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    existing_row = None
+    existing_row_index = None
+    if existing.get("status") == "success":
+        for i, row in enumerate(existing.get("data", []), start=2):  # row 1 is the header
+            if str(_get_field(row, "Title")).strip() == title:
+                existing_row = row
+                existing_row_index = i
+
+    if existing_row:
+        if not _row_looks_malformed(existing_row):
+            print(f"[content] generated_posts already has a row for '{title}'; agent saved it correctly.")
+            return existing_row
+
+        # The agent's own append_row call shipped the wrong shape (too few
+        # values, columns shifted). manage_sheet_data_tool can't validate
+        # the semantic correctness of a list an agent hands it -- it just
+        # writes what it's given. Repair the row by column *name* instead
+        # of appending a duplicate.
+        print(f"[content] generated_posts row for '{title}' looks malformed (Summary={_get_field(existing_row, 'Summary', '')!r}, Published={_get_field(existing_row, 'Published', '')!r}) -- repairing by column name.")
+        correct_values = _content_row_values(content, title)
+        headers_result = manage_sheet_data(worksheet_name="generated_posts", action="get_range", cell_range="1:1")
+        header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else _GENERATED_POSTS_FIELDS
+        for field_name, value in correct_values.items():
+            if field_name not in header_row:
+                continue
+            col_index = header_row.index(field_name) + 1
+            update_result = manage_sheet_data(
+                worksheet_name="generated_posts", action="update_cell",
+                row_index=existing_row_index, col_index=col_index, data=value,
+            )
+            if update_result.get("status") != "success":
+                print(f"[content] Warning: failed to repair '{field_name}' for '{title}': {update_result}")
+        print(f"[content] Repaired generated_posts row {existing_row_index} for '{title}'.")
+        return correct_values
+
+    row_values = _content_row_values(content, title)
     append_result = manage_sheet_data(
         worksheet_name="generated_posts",
         action="append_row",
