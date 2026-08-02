@@ -63,8 +63,13 @@ class FallbackAgentRunner(AgentRunner):
         # one agent that does (image_quality_evaluation_agent) is only ever
         # invoked as a tool, so its own fixed model is never swapped by the
         # fallback runner.
+        # OpenRouter uses a literal "~" prefix on a model slug to mean
+        # "always resolve to the latest version of this model family" --
+        # without it, "deepseek/deepseek-v4-flash-latest" 400s as "not a
+        # valid model ID" (confirmed live via the Discord bot hitting this
+        # exact string unprefixed; same underlying model ID used here).
         self.LAST_RESORT_MODELS = [
-            {"name": "deepseek-v4-flash", "model": "deepseek/deepseek-v4-flash-latest", "provider": "openrouter-paid"},
+            {"name": "deepseek-v4-flash", "model": "~deepseek/deepseek-v4-flash-latest", "provider": "openrouter-paid"},
         ]
 
         # Quota tracking at provider level

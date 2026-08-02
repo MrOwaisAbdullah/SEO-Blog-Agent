@@ -71,7 +71,11 @@ APPROVAL_CHANNEL_ID = int(os.environ["DISCORD_APPROVAL_CHANNEL_ID"])
 # still works (it's pure sheet reads, no LLM needed) but @mentioning the bot
 # just explains that chat isn't configured instead of silently doing nothing.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash-latest"
+# OpenRouter uses a literal "~" prefix on a model slug to mean "always
+# resolve to the latest version of this model family" -- without it,
+# "deepseek/deepseek-v4-flash-latest" 400s as "not a valid model ID"
+# (confirmed live: real error, real OpenRouter docs screenshot).
+DEEPSEEK_MODEL = "~deepseek/deepseek-v4-flash-latest"
 
 SHEET_SCOPE = [
     "https://spreadsheets.google.com/feeds",

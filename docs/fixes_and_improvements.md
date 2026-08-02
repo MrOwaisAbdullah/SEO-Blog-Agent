@@ -769,3 +769,21 @@ reported as a warning, not worded as an "error" -- a secondary,
 lower-confidence mitigation on top of the deterministic code fix, since
 prompt wording alone has repeatedly not been reliable enough on its own
 this session.
+
+## Fixed: wrong DeepSeek model slug on OpenRouter (missing `~` prefix)
+
+Live failure: the bot's new @mention chat returned `Error code: 400 -
+deepseek/deepseek-v4-flash-latest is not a valid model ID`. OpenRouter's
+own docs (confirmed via a real screenshot of the model page + a follow-up
+search) use a literal `~` prefix on a model slug specifically to mean
+"always resolve to the latest version of this model family" -- e.g.
+`~deepseek/deepseek-v4-flash-latest`, not `deepseek/deepseek-v4-flash-latest`.
+Without the tilde, OpenRouter doesn't recognize the alias at all.
+
+Fixed in both places this exact string appeared:
+`discord_bot/bot.py`'s `DEEPSEEK_MODEL` and
+`blog_agent/custom_runner.py`'s `LAST_RESORT_MODELS` (the pipeline's own
+paid last-resort tier) -- the same bug would have hit the pipeline's
+DeepSeek fallback the first time it was ever actually reached, just hadn't
+surfaced yet since Gemini/OpenRouter-free/Cohere have covered every run so
+far this session.
