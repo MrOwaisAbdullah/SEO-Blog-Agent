@@ -787,3 +787,43 @@ paid last-resort tier) -- the same bug would have hit the pipeline's
 DeepSeek fallback the first time it was ever actually reached, just hadn't
 surfaced yet since Gemini/OpenRouter-free/Cohere have covered every run so
 far this session.
+
+## Added: the chat assistant can act, not just report
+
+After using the read-only `/status` + chat, the user ran into its limits
+live: asking it to "write content for digital fte" got a "you'll need to
+run a slash command yourself" answer, and telling it a post was already
+published had nowhere to go either. Per direct follow-up requests, gave
+the `discord_bot/bot.py` chat agent four new tools so it can actually act
+on what it's told, instead of only describing what the human should do:
+
+- **`prioritize_topic_tool(topic_reference)`** -- finds the row matching a
+  topic (case-insensitive partial match) in whichever queue it's currently
+  sitting in (`ContentSpark_Keywords`, `research_data`, or
+  `content_briefs`, searched in that order) and moves it to the top via
+  delete + re-insert at row 2. Every pipeline stage always picks the first
+  eligible row, so this makes that topic the next one picked up --
+  explicitly *not* deleting anything else in the queue, just reordering,
+  per the user's requirement.
+- **`trigger_stage_tool(stage)`** -- wraps the same `dispatch_workflow()`
+  the `/run` command already uses, so the agent can actually kick off a
+  stage after prioritizing a topic instead of telling the user to type
+  `/run` themselves.
+- **`mark_post_published_tool(title_reference)`** -- sets a post's
+  `Published` column to "Yes" by fuzzy title match, for when a post went
+  out some way the pipeline doesn't know about (manually, or otherwise) --
+  without this, the `post` stage would eventually try to publish it again,
+  and Sanity has no dedup (see the duplicate-publish fix above).
+- **`set_post_approval_tool(title_reference, approved)`** -- sets
+  `Approve/Disapprove` by fuzzy title match, reusing the same column the
+  existing reaction handler (`set_approval()`) already writes to, so
+  approving/rejecting works identically whether it happens via a ✅/❌
+  reaction or a chat instruction.
+
+All four share `_find_row_index()` (case-insensitive substring match
+against a worksheet column) and, for prioritization,
+`_move_row_to_top()` (delete_rows + insert_row at position 2). The
+system prompt was updated to explicitly tell the agent to call these
+tools itself rather than describing the equivalent slash command --
+the whole point of giving it tools is that it stops being a read-only
+FAQ bot once it has a way to act.

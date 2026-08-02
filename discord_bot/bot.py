@@ -258,6 +258,120 @@ def get_pipeline_status_tool() -> dict:
     return gather_pipeline_status()
 
 
+def _find_row_index(worksheet, key_column: str, needle: str) -> Optional[int]:
+    """Case-insensitive substring match against key_column. Returns the
+    1-based row index of the first match, or None."""
+    records = worksheet.get_all_records()
+    needle = needle.strip().lower()
+    for i, record in enumerate(records, start=2):  # row 1 is the header
+        if needle in str(record.get(key_column, "")).strip().lower():
+            return i
+    return None
+
+
+def _move_row_to_top(worksheet, row_index: int) -> None:
+    """Reorders a row to be first in the data (row 2, right after the
+    header) without deleting or losing anything -- delete + re-insert
+    preserves the row's own values, it just changes position, so the next
+    pipeline run (which always picks the first eligible row) picks this one
+    up next instead of whatever happened to be queued earlier."""
+    row_values = worksheet.row_values(row_index)
+    worksheet.delete_rows(row_index)
+    worksheet.insert_row(row_values, 2, value_input_option="USER_ENTERED")
+
+
+# (worksheet getter, key column, label, the stage that picks this queue up next)
+_PRIORITIZABLE_QUEUES = [
+    (lambda: _get_keywords_worksheet(), "Keyword", "ContentSpark_Keywords", "research"),
+    (lambda: _get_content_spark_worksheet("research_data"), "Keyword/Topic", "research_data", "brief"),
+    (lambda: _get_content_spark_worksheet("content_briefs"), "Keyword/Topic", "content_briefs", "content"),
+]
+
+
+@function_tool
+def prioritize_topic_tool(topic_reference: str) -> dict:
+    """Moves the row matching topic_reference (case-insensitive, partial
+    match is fine -- e.g. "digital fte" matches "Digital FTE: ...") to the
+    top of whichever queue it's currently sitting in: ContentSpark_Keywords
+    (queued, not yet researched), research_data (researched, pending a
+    brief), or content_briefs (has a brief, pending content). Does NOT
+    delete or remove anything else in that queue, only reorders, so the
+    next pipeline run for that stage picks this topic up first instead of
+    whatever was ahead of it. Searches in that stage order and acts on the
+    first match found. Call this when the user asks to prioritize, bump, or
+    run a specific topic they name. Returns which queue it was found in and
+    which stage to trigger next (pass that to trigger_stage_tool)."""
+    for get_worksheet, key_column, label, next_stage in _PRIORITIZABLE_QUEUES:
+        try:
+            worksheet = get_worksheet()
+            row_index = _find_row_index(worksheet, key_column, topic_reference)
+        except Exception as e:
+            logger.warning(f"prioritize_topic_tool: failed to search {label}: {e}")
+            continue
+        if row_index is None:
+            continue
+        if row_index == 2:
+            return {"found": True, "worksheet": label, "already_first": True, "next_stage": next_stage}
+        try:
+            _move_row_to_top(worksheet, row_index)
+        except Exception as e:
+            logger.exception(f"prioritize_topic_tool: failed to reorder {label}")
+            return {"found": True, "worksheet": label, "error": str(e)}
+        return {"found": True, "worksheet": label, "moved_to_top": True, "next_stage": next_stage}
+    return {"found": False, "message": f"No queued/pending item matching '{topic_reference}' found."}
+
+
+@function_tool
+def trigger_stage_tool(stage: str) -> dict:
+    """Triggers a ContentSpark pipeline stage run via GitHub Actions --
+    the same effect as the /run slash command. Valid stages: research,
+    brief, content, post, discover_topics. Use this after
+    prioritize_topic_tool to actually advance a prioritized topic, or
+    whenever the user asks in chat to run/trigger a specific stage."""
+    if stage not in STAGE_CHOICES:
+        return {"status": "error", "error": f"'{stage}' is not a valid stage. Valid: {STAGE_CHOICES}"}
+    try:
+        dispatch_workflow(stage)
+    except Exception as e:
+        logger.exception(f"trigger_stage_tool: failed to dispatch {stage}")
+        return {"status": "error", "error": str(e)}
+    return {"status": "triggered", "stage": stage}
+
+
+# Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published
+PUBLISHED_COLUMN = 7
+
+
+def _update_generated_posts_column(title_reference: str, col_index: int, value: str) -> dict:
+    worksheet = _get_worksheet()
+    row_index = _find_row_index(worksheet, "Title", title_reference)
+    if row_index is None:
+        return {"found": False, "message": f"No post matching '{title_reference}' found in generated_posts."}
+    worksheet.update_cell(row_index, col_index, value)
+    return {"found": True, "updated": True}
+
+
+@function_tool
+def mark_post_published_tool(title_reference: str) -> dict:
+    """Marks a post's Published column as "Yes" in generated_posts, matched
+    by a case-insensitive partial title match. Use this when the user tells
+    you a post is already published (e.g. they published it manually, or it
+    went out some other way) and the sheet needs to reflect that reality --
+    otherwise the pipeline's own `post` stage would try to publish it again
+    (Sanity has no dedup, so that would create a duplicate)."""
+    return _update_generated_posts_column(title_reference, PUBLISHED_COLUMN, "Yes")
+
+
+@function_tool
+def set_post_approval_tool(title_reference: str, approved: bool) -> dict:
+    """Sets a post's Approve/Disapprove column in generated_posts, matched
+    by a case-insensitive partial title match. Use this when the user tells
+    you in chat to approve or reject a specific draft by name, as an
+    alternative to reacting ✅/❌ in the approval channel."""
+    status = "Approved" if approved else "Rejected"
+    return _update_generated_posts_column(title_reference, APPROVE_DISAPPROVE_COLUMN, status)
+
+
 def _build_discord_agent() -> Optional[Agent]:
     if not OPENROUTER_API_KEY:
         return None
@@ -268,15 +382,37 @@ def _build_discord_agent() -> Optional[Agent]:
         instructions=(
             "You are the ContentSpark AI pipeline's Discord assistant. You help the "
             "site owner keep track of their SEO blog pipeline (research -> brief -> "
-            "content -> approval -> publish) and can discuss topic ideas with them. "
-            "Be concise and conversational, like a helpful colleague, not a formal "
-            "report. Call get_pipeline_status_tool whenever a question is about "
-            "counts, what's queued, or what's pending -- don't guess numbers. You "
-            "cannot take actions yourself (no publishing, no approving) -- if asked "
-            "to do something, point to the right slash command (/run, /add_topic, "
-            "/status) instead."
+            "content -> approval -> publish), can discuss topic ideas with them, and "
+            "CAN take action yourself instead of just describing what to do. Be "
+            "concise and conversational, like a helpful colleague, not a formal "
+            "report.\n\n"
+            "- Call get_pipeline_status_tool whenever a question is about counts, "
+            "what's queued, or what's pending -- don't guess numbers.\n"
+            "- When the user names a specific topic and asks to prioritize it, run "
+            "it now, or write/generate content for it: call prioritize_topic_tool "
+            "with that topic first (it moves the matching row to the top of "
+            "whichever queue it's in, without deleting anything), then call "
+            "trigger_stage_tool with the next_stage it returns to actually kick off "
+            "that run.\n"
+            "- If prioritize_topic_tool reports found=false, say so plainly and ask "
+            "for the exact title rather than guessing.\n"
+            "- When the user tells you a post is already published (manually, or "
+            "some other way outside the normal flow), call mark_post_published_tool "
+            "so the pipeline doesn't try to publish it again and create a "
+            "duplicate -- Sanity has no dedup.\n"
+            "- When the user tells you to approve or reject a specific draft by "
+            "name, call set_post_approval_tool instead of telling them to react in "
+            "the approval channel -- you can do it directly.\n"
+            "- Do this yourself -- don't just tell the user to run a slash command "
+            "or react to a message when you can call these tools directly instead."
         ),
-        tools=[get_pipeline_status_tool],
+        tools=[
+            get_pipeline_status_tool,
+            prioritize_topic_tool,
+            trigger_stage_tool,
+            mark_post_published_tool,
+            set_post_approval_tool,
+        ],
         model=model,
     )
 
