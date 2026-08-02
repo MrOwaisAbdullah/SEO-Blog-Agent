@@ -1,7 +1,7 @@
 import logging
 import re
 from agents import Agent, ModelSettings, AgentHooks, handoff, trace
-from tools.tools import post_to_sanity_tool, fetch_internal_links_tool # Ensure correct import paths
+from tools.tools import post_to_sanity_tool, fetch_internal_links_tool, get_stock_image_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
 from blog_agent.image_agent import image_selection_agent, contextual_image_insertion_agent  # Import the new image agent tools
 from typing import Dict, Any, List, Optional
@@ -87,6 +87,7 @@ preparation_agent = Agent(
           "feedback": "Quality assessment feedback"
         }
         ```
+      - **CRITICAL FALLBACK**: `get_blog_image_tool`'s internal quality evaluation step is pinned to a single provider and has no fallback of its own, so it can fail outright when that provider is out of quota (you may see an error mentioning "quota exceeded" or a status like `IMAGE_GENERATION_FAILED`). If `get_blog_image_tool` errors, returns no usable `image_url`, or reports any kind of failure, do NOT give up and do NOT report the whole task as failed over this -- immediately call `get_stock_image_tool` yourself directly, with a search query derived from `TITLE` (e.g. the main topic/keyword, without brand names). Use whatever `image_url`/`alt_text` it returns instead. A generic but real stock photo is always better than aborting the publish -- getting the post published is the priority, not having a perfect image.
       - Extract the `image_url` and `alt_text` values from this JSON response for use in later steps.
 
     5. **Derive Fields**
@@ -136,14 +137,15 @@ preparation_agent = Agent(
     ## Tools
     - `manage_sheet_data_tool`
     - `fetch_internal_links_tool`
-    - `get_blog_image_tool`
-    
+    - `get_blog_image_tool` (try this first for an image)
+    - `get_stock_image_tool` (guaranteed fallback if `get_blog_image_tool` fails for any reason -- see step 4)
+
     ## Critical Requirements
-    - **IMPORTANT**: You MUST extract the `image_url` from the JSON response of `get_blog_image_tool`.
+    - **IMPORTANT**: You MUST extract the `image_url` from the JSON response of `get_blog_image_tool` (or `get_stock_image_tool` if you had to fall back to it).
     - **IMPORTANT**: Do NOT use example URLs like `https://example.com/ai-smart-glasses.jpg`.
     - **IMPORTANT**: The `IMAGE_URL` field in your output MUST contain the actual path returned by the tool.
     """,
-    tools=[manage_sheet_data_tool, fetch_internal_links_tool, image_selection_agent.as_tool(tool_name="get_blog_image_tool", tool_description="Selects or generates a relevant image for blog posts")],
+    tools=[manage_sheet_data_tool, fetch_internal_links_tool, get_stock_image_tool, image_selection_agent.as_tool(tool_name="get_blog_image_tool", tool_description="Selects or generates a relevant image for blog posts")],
     hooks=MyAgentHooks(),
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.5),

@@ -966,3 +966,38 @@ This only self-heals a title if/when the `content` stage processes it
 (or reprocesses it) again -- it does not retroactively scan and fix every
 row already in the sheet. If other rows are affected, they'd need a manual
 check or a one-off audit pass; ask if that's wanted.
+
+## Fixed: post stage giving up entirely when image generation hit a quota wall
+
+Live failure: `/run post` failed with `Preparation Agent output missing
+required POST_DATA fields: STATUS: IMAGE_GENERATION_FAILED / MESSAGE:
+Gemini API quota exceeded...`. Freepik 401'd (known, still needs a key
+rotation), and then the image pipeline hit Gemini's daily quota too -- but
+unlike every other LLM call in this pipeline, that one had no fallback
+available at all, so the whole `post` stage aborted instead of degrading to
+a stock photo.
+
+Root cause: `image_quality_evaluation_agent`
+(`blog_agent/image_agent.py`) is invoked as a nested tool
+(`.as_tool(...)`) with a model pinned directly to `gemini-flash-latest` --
+it never goes through `custom_runner.run_with_fallback`'s provider
+rotation at all, by original design (documented rationale: DeepSeek is
+text-only, so vision calls were left Gemini-only). Whenever Gemini's daily
+quota (20/day, confirmed real) is exhausted -- which happens routinely in
+this pipeline's normal usage -- every image evaluation call fails
+outright. `image_selection_agent`'s own instructions do say "if all
+generation attempts fail, use `get_stock_image_tool`", but the Preparation
+Agent that actually *calls* `image_selection_agent` (as `get_blog_image_tool`)
+has no tools of its own beyond that one call -- when the nested tool
+errored out entirely, Preparation Agent had nothing left to fall back to
+and just reported the error as if it were the whole task's result.
+
+Fixed by giving the Preparation Agent its own independent escape hatch:
+added `get_stock_image_tool` directly to its tool list
+(`blog_agent/posting_agent.py`), and an explicit instruction that if
+`get_blog_image_tool` fails or errors for any reason, it should call
+`get_stock_image_tool` itself (Pexels, no LLM/vision dependency at all) and
+use whatever it returns rather than aborting the publish. A generic real
+photo beats a failed post -- getting content published is the priority.
+Verified the import resolves cleanly and `preparation_agent.tools` now
+includes both `get_stock_image_tool` and `get_blog_image_tool`.
