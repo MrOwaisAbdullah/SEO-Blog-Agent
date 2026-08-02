@@ -25,8 +25,7 @@ Hugging Face Spaces secrets.
 | `API_KEY` | This app's own FastAPI auth | Required |
 | `GOOGLE_CREDENTIALS` | Google Sheets (pipeline's database) | Required |
 | `GEMINI_API_KEY` | Gemini (primary LLM) | Required |
-| `OPENROUTER_API_KEY` | OpenRouter (LLM fallback, via `openrouter/free` auto-router) | Required |
-| `COHERE_API_KEY` | Cohere (LLM fallback) | Required |
+| `OPENROUTER_API_KEY` | OpenRouter (LLM fallback, via `openrouter/free` auto-router, and the paid DeepSeek last-resort tier) | Required |
 | `TAVILY_API_KEY` | Tavily (research search/extract/crawl) | Required |
 | `SERPAPI_KEY` | SerpAPI (search fallback) | Required |
 | `PEXELS_API_KEY` | Pexels (image fallback) | Required |
@@ -37,7 +36,6 @@ Hugging Face Spaces secrets.
 | `SANITY_API_TOKEN` | Sanity CMS (needs write access) | Required |
 | `SANITY_DEFAULT_AUTHOR_ID` | Sanity CMS (author doc `_id`) | Required |
 | `SANITY_DEFAULT_AUTHOR_NAME` | Sanity CMS (author display name) | Required |
-| `MINIMAX_API_KEY` | MiniMax LLM | Defined, not active — the provider is commented out in `custom_runner.py`'s `LLM_MODELS` list |
 | `X_API_BEARER_TOKEN` | X/Twitter search | Defined, unused — `x_search_tool` isn't attached to any agent |
 | `RAPID_API_YOUTUBE_TRANSCRIPT_API_KEY`, `YOUTUBE_TRANSCRIPT_IO_API_TOKEN`, `YOUTUBE_TRANSCRIPT_IO_API_TOKEN_2` | YouTube transcripts | Defined, unused — `tools/youtube_tools.py` isn't imported anywhere; the YouTube research agent is commented out |
 | `ASSEMBLYAI_API_KEY`, `STARRYAI_API_KEY` | — | In the old README's `.env` template but referenced by **no code at all**. Skip these. |
@@ -125,8 +123,7 @@ error regardless of how correct `GOOGLE_CREDENTIALS` is.
 ## 3. LLM providers
 
 The custom fallback runner (`blog_agent/custom_runner.py`) rotates across
-these on quota/error — you need all three for the fallback to actually mean
-anything:
+these on quota/error:
 
 - **Gemini** — `GEMINI_API_KEY` from [Google AI Studio](https://aistudio.google.com/).
   Uses the `-latest` model aliases (`gemini-flash-latest`,
@@ -137,14 +134,10 @@ anything:
   aliases always resolve to whatever Google currently recommends, so this
   class of surprise shouldn't recur for the Gemini provider specifically.
   `.github/workflows/check-models.yml` exists to re-verify this at any time.
-- **Cohere** — `COHERE_API_KEY` from [dashboard.cohere.com](https://dashboard.cohere.com/).
-  Note: Cohere's free trial key is explicitly barred from production/
-  commercial use by their own terms — worth a deliberate decision before
-  relying on it for an unattended, real content pipeline.
 - **OpenRouter** — `OPENROUTER_API_KEY` from [openrouter.ai](https://openrouter.ai/).
   Used two ways: `openrouter/free` (an auto-router that always resolves to
   whatever's currently free, immune to any single free model being delisted)
-  as a regular fallback tier, and `deepseek/deepseek-v4-flash-latest` as a **paid,
+  as a regular fallback tier, and `~deepseek/deepseek-v4-flash-latest` as a **paid,
   genuinely-last-resort** tier — only tried once every free option above it
   has failed or is unavailable, regardless of how reliable it turns out to
   be (see the comment on `LAST_RESORT_MODELS` in `custom_runner.py`). Needs
@@ -152,10 +145,26 @@ anything:
   DeepSeek V4 Flash is text-only (no vision) — fine, since no agent that
   goes through the fallback rotation needs vision (the one that does,
   `image_quality_evaluation_agent`, is only ever invoked as a tool with its
-  own fixed Gemini model, never swapped by the fallback runner).
+  own fixed Gemini model, never swapped by the fallback runner). Note the
+  `~` prefix on the model slug — that's OpenRouter's own syntax for "always
+  resolve to the latest version of this model family"; without it the slug
+  400s as an invalid model ID.
 
-Daily quota assumptions baked into `custom_runner.py`'s `model_limits`: Gemini
-50, Cohere 33, OpenRouter (free tier) 50 — these are approximate free-tier
+**Cohere was removed** (previously a third fallback tier, `command-a-03-2025`).
+Across real production use it repeatedly returned malformed structured
+output when it was the model actually handling a run: lowercase/underscored
+JSON keys instead of the documented casing, raw Markdown with no JSON
+envelope at all (in more than one different shape), an unexecuted tool call
+leaked back as plain text instead of actually running, and a response with
+the real fields nested under a `"data"` wrapper instead of the documented
+flat structure. Each was fixed defensively as it appeared
+(`scripts/run_stage.py`'s `_get_field`/`_extract_content_from_markdown`),
+but new shapes kept surfacing — removed rather than continuing to chase
+variants. If you still have a `COHERE_API_KEY` GitHub secret configured,
+it's safe to delete; nothing reads it anymore.
+
+Daily quota assumptions baked into `custom_runner.py`'s `model_limits`:
+Gemini 20, OpenRouter (free tier) 50 — these are approximate free-tier
 limits and worth checking against your actual plan. The paid DeepSeek tier
 has no real daily cap (pay-per-token, not quota-limited).
 
@@ -236,7 +245,7 @@ bot in `discord_bot/`, deployed to the existing Hetzner VPS via Dokploy.
 
 Repo → Settings → Secrets and variables → Actions → New repository secret.
 Add every "Required" row from the [Quick reference](#quick-reference) table
-above (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `COHERE_API_KEY`,
+above (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
 `TAVILY_API_KEY`, `SERPAPI_KEY`, `PEXELS_API_KEY`, `FREEPIC_API_KEY`,
 `SANITY_*`, `GOOGLE_CREDENTIALS`), plus `CLOUDFLARE_ACCOUNT_ID` +
 `CLOUDFLARE_API_TOKEN` (optional but recommended, image-gen fallback) and

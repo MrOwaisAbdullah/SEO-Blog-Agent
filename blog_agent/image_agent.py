@@ -433,7 +433,11 @@ image_selection_agent = Agent(
         get_stock_image_tool,
         image_quality_evaluation_agent.as_tool(tool_name="image_quality_evaluation_agent", tool_description="Evaluates image quality and relevance for blog posts")
     ],
-    model=custom_runner.get_model_by_name("cohere"),
+    # Was pinned to "cohere" -- broken now that Cohere's been removed from
+    # LLM_MODELS entirely (see custom_runner.py), which would have raised
+    # ValueError at the first call. Switched to the same default used
+    # elsewhere in this file rather than leaving it on a removed provider.
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.7)
 )
 

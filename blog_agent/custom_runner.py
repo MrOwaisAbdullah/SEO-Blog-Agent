@@ -32,14 +32,17 @@ class FallbackAgentRunner(AgentRunner):
         super().__init__()
         # LLM model configurations
         # Gemini models share a single quota; other providers have their own
-        # Preferred ordering: minimax first so it's chosen initially when no
-        # provider statistics exist. The fallback logic will still reorder
-        # models by performance over time.
         self.LLM_MODELS = [
-            # {"name": "minimax-m2", "model": "MiniMax-M2", "client": self.get_minimax_client, "provider": "minimax"},
             {"name": "gemini-flash-latest", "model": "gemini-flash-latest", "provider": "gemini"},
             {"name": "gemini-flash-lite-latest", "model": "gemini-flash-lite-latest", "provider": "gemini"},
-            {"name": "cohere", "model": "command-a-03-2025", "client": self.get_cohere_client, "provider": "cohere"},
+            # Cohere (command-a-03-2025) removed: across this session it
+            # repeatedly returned malformed structured output when used as a
+            # fallback -- lowercase/underscored JSON keys, raw Markdown with
+            # no JSON envelope (in at least two different shapes), an
+            # unexecuted tool call leaked as plain text, and a "data"-nested
+            # wrapper instead of the documented flat structure. Each was
+            # fixed defensively in scripts/run_stage.py, but new shapes kept
+            # appearing -- removed rather than continuing to chase variants.
             # openrouter/free is OpenRouter's own auto-router: it always
             # resolves to whatever free model is currently available instead
             # of a hardcoded :free model ID. OpenRouter's free catalog churns
@@ -73,9 +76,7 @@ class FallbackAgentRunner(AgentRunner):
         ]
 
         # Quota tracking at provider level
-        self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, "openrouter-paid": 0,
-        # "minimax": 0
-        }
+        self.model_usage = {"gemini": 0, "openrouter": 0, "openrouter-paid": 0}
         # Approximate daily limits. Gemini's free-tier limit is per specific
         # model, not a flat account-wide number -- confirmed live from a real
         # 429 response: "generativelanguage.googleapis.com/generate_content_
@@ -88,20 +89,18 @@ class FallbackAgentRunner(AgentRunner):
         # $10+ in credits at some point, which isn't "free" anymore).
         # openrouter-paid has no real daily cap (it's pay-per-token, not
         # quota-limited) -- the number below is just a sanity ceiling.
-        self.model_limits = {"gemini": 20, "openrouter": 50, "cohere": 33, "openrouter-paid": 1000, "minimax": 500}
+        self.model_limits = {"gemini": 20, "openrouter": 50, "openrouter-paid": 1000}
         self.last_reset = datetime.now()
 
         # Provider performance tracking
         self.provider_stats = {
             "gemini": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
             "openrouter": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            "cohere": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
             "openrouter-paid": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            # "minimax": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0}
         }
 
         # Temporary provider unavailability tracking
-        self.provider_unavailable_until = {"gemini": None, "openrouter": None, "cohere": None, "openrouter-paid": None, "minimax": None}
+        self.provider_unavailable_until = {"gemini": None, "openrouter": None, "openrouter-paid": None}
 
     def get_gemini_client(self):
         from agents import AsyncOpenAI
@@ -115,21 +114,6 @@ class FallbackAgentRunner(AgentRunner):
         return AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ['OPENROUTER_API_KEY']
-        )
-
-    def get_cohere_client(self):
-        from agents import AsyncOpenAI
-        return AsyncOpenAI(
-            base_url="https://api.cohere.ai/compatibility/v1",
-            api_key=os.environ['COHERE_API_KEY']
-        )
-
-    def get_minimax_client(self):
-        from agents import AsyncOpenAI
-        # MiniMax-compatible API client using the same AsyncOpenAI wrapper
-        return AsyncOpenAI(
-            base_url="https://api.minimax.io/v1",
-            api_key=os.environ['MINIMAX_API_KEY']
         )
 
     def get_model_by_name(self, model_name):
@@ -152,10 +136,6 @@ class FallbackAgentRunner(AgentRunner):
                         client = self.get_gemini_client()
                     elif model_config["provider"] in ("openrouter", "openrouter-paid"):
                         client = self.get_openrouter_client()
-                    elif model_config["provider"] == "cohere":
-                        client = self.get_cohere_client()
-                    # elif model_config["provider"] == "minimax":
-                    #     client = self.get_minimax_client()
                     else:
                         raise ValueError(f"Unknown provider: {model_config['provider']}")
 
@@ -185,9 +165,7 @@ class FallbackAgentRunner(AgentRunner):
         # Reset usage daily
         if (datetime.now() - self.last_reset).days >= 1:
             print(f"Resetting daily usage counters for all providers")
-            self.model_usage = {"gemini": 0, "openrouter": 0, "cohere": 0, "openrouter-paid": 0,
-            # "minimax": 0
-            }
+            self.model_usage = {"gemini": 0, "openrouter": 0, "openrouter-paid": 0}
             self.last_reset = datetime.now()
         
         # Check if provider is temporarily unavailable

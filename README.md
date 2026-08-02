@@ -46,7 +46,6 @@ Create a `.env` file in the root directory with the following variables:
 # LLM API Keys
 GEMINI_API_KEY=your_gemini_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
-COHERE_API_KEY=your_cohere_api_key
 OPENAI_API_KEY=your_openai_api_key
 
 # Sanity CMS Configuration
@@ -79,7 +78,6 @@ DEFAULT_MODEL=gemini-2.5-flash
 #### LLM API Keys
 - `GEMINI_API_KEY` - Google Gemini API key for primary LLM
 - `OPENROUTER_API_KEY` - OpenRouter API key for fallback LLMs
-- `COHERE_API_KEY` - Cohere API key for fallback LLMs
 - `OPENAI_API_KEY` - OpenAI API key for fallback LLMs
 
 #### Sanity CMS Configuration

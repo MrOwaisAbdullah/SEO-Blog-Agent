@@ -827,3 +827,58 @@ system prompt was updated to explicitly tell the agent to call these
 tools itself rather than describing the equivalent slash command --
 the whole point of giving it tools is that it stops being a read-only
 FAQ bot once it has a way to act.
+
+## Fifth `_get_field` variant: fields nested under a "data" wrapper
+
+Yet another live shape from Cohere on the `brief` stage: instead of the
+flat structure the prompt's example shows, it returned
+`{"status": "success", "message": "...", "data": {"Keyword/Topic": ...,
+"Brief Content": ..., ...}}` -- all the real fields nested one level down
+under a `"data"` key. `_get_field` only checked top-level keys, so
+`Keyword/Topic` came back empty and the brief stage failed with "Brief
+output missing Keyword/Topic" even though the data was right there, just
+nested.
+
+Extended `_get_field` to fall back to checking one level of nesting: if a
+field isn't found at the top level, it now also checks inside any
+top-level value that's itself a dict. This covers `"data"`/`"result"`/
+similar wrapper shapes generically rather than special-casing the specific
+key name "data". Verified directly against the real payload from the
+failing run.
+
+## Removed Cohere as an LLM provider entirely
+
+By this point Cohere (`command-a-03-2025`, used as a fallback tier) had
+caused six distinct incidents in one extended live-testing session: three
+JSON-shape variants (lowercase/underscored keys, a "data"-nested wrapper)
+and two non-JSON variants (two different raw-Markdown shapes), an
+unexecuted tool call leaked as plain text, plus one run that worked
+correctly. Each was fixed defensively as it appeared, but new shapes kept
+surfacing faster than they could reasonably be chased. Removed entirely
+per explicit request rather than continuing that pattern.
+
+Removed from `blog_agent/custom_runner.py`: the `LLM_MODELS` entry,
+`get_cohere_client()`, and every `"cohere"` key in `model_usage`,
+`model_limits`, `provider_stats`, and `provider_unavailable_until`. Also
+took the opportunity to fully remove MiniMax (per a follow-up request) --
+it was already commented out of `LLM_MODELS` and never active, but
+`get_minimax_client()`, its provider-routing branch, and its dict entries
+were still sitting around as dead code. Removed `COHERE_API_KEY` /
+`MINIMAX_API_KEY` from `.env.example`, `README.md`,
+`docs/service_setup.md`, `.github/workflows/pipeline.yml`, and the Cohere
+check from `.github/workflows/check-models.yml` (replaced with a DeepSeek
+last-resort check instead, now that its `~` prefix bug is fixed).
+
+**Caught before it shipped:** two agents were hardcoded to
+`model=custom_runner.get_model_by_name("cohere")` as their *only* model --
+`image_selection_agent` (`blog_agent/image_agent.py`) and the Output Agent
+inside `combined_research_workflow` (`blog_agent/research_agent.py`).
+Removing Cohere from `LLM_MODELS` without touching these would have made
+`get_model_by_name("cohere")` raise `ValueError` immediately -- for
+`image_selection_agent` that's at **import time** (since `model=` is
+evaluated when the module loads), which would have broken every stage that
+transitively imports `image_agent.py` (which is most of the pipeline, via
+`posting_agent.py`). Caught by actually importing `image_agent.py` and
+constructing `FallbackAgentRunner()` after the removal, rather than just
+grepping for the word "cohere" in strings. Both switched to
+`gemini-flash-latest`, the same default used elsewhere in each file.

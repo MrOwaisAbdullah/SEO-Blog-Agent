@@ -262,7 +262,11 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         """,
         tools=[manage_sheet_data_tool],
         hooks=MyAgentHooks(),
-        model=custom_runner.get_model_by_name("cohere"),
+        # Was pinned to "cohere" -- broken now that Cohere's been removed
+        # from LLM_MODELS entirely (see custom_runner.py), which would have
+        # raised ValueError at the first call. Switched to the same default
+        # used by the other agents in this workflow.
+        model=custom_runner.get_model_by_name("gemini-flash-latest"),
         model_settings=ModelSettings(temperature=0.5),
     )
 

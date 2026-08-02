@@ -92,11 +92,24 @@ def _get_field(d: dict, name: str, default=""):
     match it -- confirmed live: Cohere returned "keyword/topic" and
     "brief_content" for the same fields in one run, then the properly-cased
     keys in another. Match keys after stripping case and non-alphanumeric
-    characters instead of requiring an exact string match."""
+    characters instead of requiring an exact string match.
+
+    Also confirmed live: a different Cohere run nested the actual fields
+    under a "data" wrapper instead of returning them flat
+    ({"status": ..., "message": ..., "data": {"Keyword/Topic": ...}}), even
+    though the prompt's example shows a flat structure. If the field isn't
+    found at the top level, check one level into any dict-valued top-level
+    field too -- covers "data"/"result"/"brief"-style wrappers without
+    needing to special-case a specific wrapper key name."""
     target = _normalize_key(name)
     for key, value in d.items():
         if _normalize_key(key) == target:
             return value
+    for value in d.values():
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                if _normalize_key(nested_key) == target:
+                    return nested_value
     return default
 
 

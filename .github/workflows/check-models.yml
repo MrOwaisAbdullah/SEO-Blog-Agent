@@ -29,30 +29,18 @@ jobs:
             echo
           done
 
-      - name: Check Cohere
-        env:
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
-        run: |
-          echo "=== command-a-03-2025 ==="
-          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
-            "https://api.cohere.ai/compatibility/v1/chat/completions" \
-            -H "Authorization: Bearer $COHERE_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"model": "command-a-03-2025", "messages": [{"role": "user", "content": "reply with just OK"}]}')
-          echo "HTTP $code"
-          cat /tmp/resp.json
-          echo
-
       - name: Check OpenRouter
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          echo "=== openrouter/free ==="
-          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
-            "https://openrouter.ai/api/v1/chat/completions" \
-            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"model": "openrouter/free", "messages": [{"role": "user", "content": "reply with just OK"}]}')
-          echo "HTTP $code"
-          cat /tmp/resp.json
-          echo
+          for model in openrouter/free "~deepseek/deepseek-v4-flash-latest"; do
+            echo "=== $model ==="
+            code=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+              "https://openrouter.ai/api/v1/chat/completions" \
+              -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"model\": \"$model\", \"messages\": [{\"role\": \"user\", \"content\": \"reply with just OK\"}]}")
+            echo "HTTP $code"
+            cat /tmp/resp.json
+            echo
+          done
