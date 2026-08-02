@@ -262,7 +262,7 @@ def _build_post_data_block(fields: Dict[str, str]) -> str:
 # --- Function Flow Definition ---
 # This defines the sequence: Preparation Agent runs -> Output captured -> Posting Agent runs with output
 
-async def run_posting_workflow(max_retries: int = 3) -> Dict[str, Any]:
+async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
     """
     Executes the complete posting workflow:
     1. Runs the Preparation Agent to select and prepare a post.

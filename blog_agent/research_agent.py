@@ -42,7 +42,7 @@ def _looks_like_refusal_or_empty(text: str) -> bool:
     lowered = stripped.lower()
     return any(marker in lowered for marker in _REFUSAL_MARKERS)
 
-async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS, max_retries: int = 3) -> Dict[str, Optional[str]]:
+async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS, max_retries: int = 2) -> Dict[str, Optional[str]]:
     """
     Executes a combined workflow using Agents SDK, where the Triage Agent selects a keyword or link from ContentSpark_Keywords,
     the Researcher Agent conducts dual-stream research, and the Output Agent consolidates results into the research_data worksheet.
@@ -375,7 +375,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     return output_result
 
 
-async def run_topic_discovery_workflow(max_retries: int = 3, max_turns: int = 20) -> Dict:
+async def run_topic_discovery_workflow(max_retries: int = 2, max_turns: int = 20) -> Dict:
     """Finds fresh topic candidates from current trending discussions (Reddit,
     Quora, general web) when ContentSpark_Keywords is empty, instead of the
     pipeline just doing nothing until someone manually adds a keyword.

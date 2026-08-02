@@ -1,25 +1,36 @@
 """
 Discord bot for ContentSpark AI.
 
-Three responsibilities:
+Four responsibilities:
   1. Approvals -- listens for checkmark/cross reactions on draft-preview
      messages (posted by scripts/run_stage.py's Discord webhook call after the
      "content" stage) and writes the result into the Approve/Disapprove column
-     of the generated_posts worksheet.
+     of the generated_posts worksheet. Also handles reactions on trending-topic
+     candidate messages (posted by the "discover_topics" stage), adding an
+     approved candidate to ContentSpark_Keywords.
   2. Triggering -- a /run slash command that dispatches pipeline.yml via
      GitHub's workflow_dispatch API, for on-demand runs.
   3. Queueing -- a /add_topic slash command that appends a new row to
      ContentSpark_Keywords (Status=available) from a short concept/problem
      statement or an uploaded .txt transcript, for the Triage Agent to pick
      up on the next research run.
+  4. Status/chat -- a /status slash command for a quick deterministic count of
+     what's queued/pending at each pipeline stage, and conversational replies
+     (via DeepSeek V4 Flash on OpenRouter) when the bot is @mentioned, so you
+     can ask things like "how many briefs are waiting" or discuss a topic idea
+     without leaving Discord.
 
-Deliberately self-contained: talks to Google Sheets directly via gspread
-instead of importing tools/sheet_tool.py from the main pipeline. That module
-imports the openai-agents SDK at the top level (for its @function_tool
-decorators), which this container has no other reason to need, and importing
-it would couple this bot's deploy to changes in the pipeline's tools/ code
-even though they deploy independently (see .github/workflows/deploy-bot.yml's
-path filter).
+Talks to Google Sheets directly via gspread rather than importing
+tools/sheet_tool.py from the main pipeline -- that module's @function_tool
+decorators would otherwise couple this bot's deploy to changes in the
+pipeline's tools/ code even though they deploy independently (see
+.github/workflows/deploy-bot.yml's path filter). The chat feature does use
+the openai-agents SDK directly (same package as the pipeline, pinned to the
+same version) since a real Agent -- with its own tool-calling loop -- is
+what makes "ask the bot about pipeline status" actually work instead of a
+single stateless completion call; the SDK dependency was worth taking on
+for that, but the bot still authors its own small tool set rather than
+importing the pipeline's.
 """
 import json
 import logging
@@ -30,9 +41,15 @@ from typing import Optional
 import discord
 import gspread
 import requests
+from agents import Agent, AsyncOpenAI, OpenAIChatCompletionsModel, Runner, function_tool, set_tracing_disabled
 from discord import app_commands
 from discord.ext import commands, tasks
 from google.oauth2.service_account import Credentials
+
+# Not using OpenAI's own API for inference (OpenRouter/DeepSeek instead), so
+# tracing export is disabled -- same rationale as the main pipeline's
+# scripts/run_stage.py.
+set_tracing_disabled(True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("contentspark-bot")
@@ -50,6 +67,11 @@ GITHUB_REPO = (
     .strip("/")
 )
 APPROVAL_CHANNEL_ID = int(os.environ["DISCORD_APPROVAL_CHANNEL_ID"])
+# Optional: powers the conversational /status follow-up chat. If unset, /status
+# still works (it's pure sheet reads, no LLM needed) but @mentioning the bot
+# just explains that chat isn't configured instead of silently doing nothing.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash-latest"
 
 SHEET_SCOPE = [
     "https://spreadsheets.google.com/feeds",
@@ -99,8 +121,12 @@ def _get_gspread_client():
     return _gspread_client
 
 
+def _get_content_spark_worksheet(worksheet_name: str):
+    return _get_gspread_client().open(SPREADSHEET_NAME).worksheet(worksheet_name)
+
+
 def _get_worksheet():
-    return _get_gspread_client().open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+    return _get_content_spark_worksheet(WORKSHEET_NAME)
 
 
 def _get_keywords_worksheet():
@@ -125,6 +151,151 @@ def add_keyword(content: str) -> None:
     columns get_keyword_tool (tools/sheet_tool.py) expects: Keyword, Status."""
     worksheet = _get_keywords_worksheet()
     worksheet.append_row([content, "available"])
+
+
+# Cap how many sample titles get pulled into a status report / chat prompt --
+# these sheets can grow to hundreds of rows, and this is a glanceable summary,
+# not a full export.
+MAX_SAMPLE_ITEMS = 5
+
+
+def gather_pipeline_status() -> dict:
+    """Reads every stage's worksheet and returns counts + a few sample titles
+    for what's currently queued/pending at each step. Used by both /status
+    (direct) and the @mention chat (as live context fed to the LLM) so the
+    two never disagree with each other."""
+    status = {}
+
+    try:
+        keyword_records = _get_keywords_worksheet().get_all_records()
+        available = [r for r in keyword_records if str(r.get("Status", "")).strip().lower() == "available"]
+        status["keywords_available"] = len(available)
+        status["keyword_samples"] = [str(r.get("Keyword", "")).strip() for r in available[:MAX_SAMPLE_ITEMS]]
+    except Exception as e:
+        logger.warning(f"gather_pipeline_status: failed to read ContentSpark_Keywords: {e}")
+        status["keywords_available"] = None
+
+    try:
+        research_records = _get_content_spark_worksheet("research_data").get_all_records()
+        ungenerated = [r for r in research_records if str(r.get("Generated", "")).strip().lower() != "yes"]
+        status["research_pending_brief"] = len(ungenerated)
+    except Exception as e:
+        logger.warning(f"gather_pipeline_status: failed to read research_data: {e}")
+        status["research_pending_brief"] = None
+
+    try:
+        brief_records = _get_content_spark_worksheet("content_briefs").get_all_records()
+        ungenerated = [r for r in brief_records if str(r.get("Generated", "")).strip().lower() != "yes"]
+        status["briefs_pending_content"] = len(ungenerated)
+        status["brief_samples"] = [str(r.get("Keyword/Topic", "")).strip() for r in ungenerated[:MAX_SAMPLE_ITEMS]]
+    except Exception as e:
+        logger.warning(f"gather_pipeline_status: failed to read content_briefs: {e}")
+        status["briefs_pending_content"] = None
+
+    try:
+        post_records = _get_worksheet().get_all_records()  # generated_posts
+        pending_review = [r for r in post_records if not str(r.get("Approve/Disapprove", "")).strip()]
+        approved_unpublished = [
+            r for r in post_records
+            if str(r.get("Approve/Disapprove", "")).strip().lower() == "approved"
+            and str(r.get("Published", "")).strip().lower() != "yes"
+        ]
+        status["posts_pending_review"] = len(pending_review)
+        status["posts_approved_unpublished"] = len(approved_unpublished)
+        status["posts_total_generated"] = len(post_records)
+        status["pending_review_samples"] = [str(r.get("Title", "")).strip() for r in pending_review[:MAX_SAMPLE_ITEMS]]
+    except Exception as e:
+        logger.warning(f"gather_pipeline_status: failed to read generated_posts: {e}")
+        status["posts_pending_review"] = None
+        status["posts_approved_unpublished"] = None
+        status["posts_total_generated"] = None
+
+    try:
+        published_records = _get_content_spark_worksheet("published_posts").get_all_records()
+        status["posts_published_total"] = len(published_records)
+    except Exception as e:
+        logger.warning(f"gather_pipeline_status: failed to read published_posts: {e}")
+        status["posts_published_total"] = None
+
+    return status
+
+
+def format_status_report(status: dict) -> str:
+    def n(key):
+        value = status.get(key)
+        return "?" if value is None else str(value)
+
+    lines = [
+        "**ContentSpark Pipeline Status**",
+        f"📥 Keywords queued: **{n('keywords_available')}**",
+        f"🔍 Research pending a brief: **{n('research_pending_brief')}**",
+        f"📝 Briefs pending content: **{n('briefs_pending_content')}**",
+        f"👀 Posts awaiting your review: **{n('posts_pending_review')}**",
+        f"✅ Approved, not yet published: **{n('posts_approved_unpublished')}**",
+        f"📚 Total generated posts: **{n('posts_total_generated')}**",
+        f"🌐 Total published: **{n('posts_published_total')}**",
+    ]
+    if status.get("keyword_samples"):
+        lines.append("\n**Queued keywords:** " + ", ".join(status["keyword_samples"]))
+    if status.get("pending_review_samples"):
+        lines.append("**Awaiting review:** " + ", ".join(status["pending_review_samples"]))
+    return "\n".join(lines)
+
+
+@function_tool
+def get_pipeline_status_tool() -> dict:
+    """Returns live counts of what's queued/pending at each ContentSpark
+    pipeline stage: keywords queued, research pending a brief, briefs
+    pending content, posts awaiting review, approved-but-unpublished posts,
+    total generated posts, and total published posts -- plus a few sample
+    titles for the queued/pending items. Call this whenever the question is
+    about counts, what's queued, or what's currently pending; don't guess
+    numbers."""
+    return gather_pipeline_status()
+
+
+def _build_discord_agent() -> Optional[Agent]:
+    if not OPENROUTER_API_KEY:
+        return None
+    client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+    model = OpenAIChatCompletionsModel(model=DEEPSEEK_MODEL, openai_client=client)
+    return Agent(
+        name="ContentSpark Assistant",
+        instructions=(
+            "You are the ContentSpark AI pipeline's Discord assistant. You help the "
+            "site owner keep track of their SEO blog pipeline (research -> brief -> "
+            "content -> approval -> publish) and can discuss topic ideas with them. "
+            "Be concise and conversational, like a helpful colleague, not a formal "
+            "report. Call get_pipeline_status_tool whenever a question is about "
+            "counts, what's queued, or what's pending -- don't guess numbers. You "
+            "cannot take actions yourself (no publishing, no approving) -- if asked "
+            "to do something, point to the right slash command (/run, /add_topic, "
+            "/status) instead."
+        ),
+        tools=[get_pipeline_status_tool],
+        model=model,
+    )
+
+
+# Built once at import time -- OPENROUTER_API_KEY doesn't change at runtime,
+# so there's no reason to rebuild the client/agent on every message.
+_discord_agent = _build_discord_agent()
+
+
+async def ask_discord_agent(user_message: str) -> str:
+    """Runs the ContentSpark Assistant agent on a user's message. Stateless
+    per call -- no conversation history/session is kept, so each mention is
+    answered fresh (the agent calls get_pipeline_status_tool itself if the
+    question needs live counts, rather than every message paying for a
+    sheet read whether it needs one or not)."""
+    if _discord_agent is None:
+        return "Chat isn't configured yet -- ask the admin to set OPENROUTER_API_KEY."
+    try:
+        result = await Runner.run(_discord_agent, user_message, max_turns=6)
+        return str(result.final_output)
+    except Exception as e:
+        logger.exception("Discord agent run failed")
+        return f"⚠️ Couldn't get a response: {e}"
 
 
 def dispatch_workflow(stage: str) -> None:
@@ -326,6 +497,48 @@ async def add_topic_command(
     if truncated:
         reply += "\n⚠️ Content was truncated to fit Google Sheets' 50,000-character cell limit."
     await interaction.followup.send(reply)
+
+
+@bot.tree.command(name="status", description="Show how many keywords/briefs/posts are queued at each pipeline stage")
+async def status_command(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        status = gather_pipeline_status()
+    except Exception as e:
+        logger.exception("Failed to gather pipeline status")
+        await interaction.followup.send(f"⚠️ Failed to read pipeline status: {e}")
+        return
+    await interaction.followup.send(format_status_report(status))
+
+
+async def _send_chunked(channel, text: str, limit: int = 1900) -> None:
+    while text:
+        await channel.send(text[:limit])
+        text = text[limit:]
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if bot.user is None or bot.user not in message.mentions:
+        return
+
+    question = message.content
+    for mention in (f"<@{bot.user.id}>", f"<@!{bot.user.id}>"):
+        question = question.replace(mention, "")
+    question = question.strip()
+    if not question:
+        question = "What's the current pipeline status? Give me a quick overview."
+
+    async with message.channel.typing():
+        reply = await ask_discord_agent(question)
+    await _send_chunked(message.channel, reply)
+
+    # This bot only uses slash commands (app_commands), but calling this is
+    # the documented discord.py pattern for any bot that overrides on_message
+    # -- cheap insurance against silently breaking prefix commands later.
+    await bot.process_commands(message)
 
 
 if __name__ == "__main__":

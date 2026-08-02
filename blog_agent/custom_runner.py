@@ -276,7 +276,7 @@ class FallbackAgentRunner(AgentRunner):
         input_data,
         context=None,
         max_turns=15,
-        max_retries=3,
+        max_retries=2,
         hooks: RunHooks | None = None,
     ) -> RunResult:
         """

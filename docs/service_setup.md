@@ -284,6 +284,11 @@ Discord call `workflow_dispatch`.
    `.../repos/https://github.com/.../actions/workflows/...`; `bot.py`
    normalizes this automatically now, but the plain `owner/repo` form is
    still the documented one), `GOOGLE_CREDENTIALS`, `DISCORD_APPROVAL_CHANNEL_ID`.
+   Also `OPENROUTER_API_KEY` (optional — same key as the pipeline's own
+   secret works fine, it's just a separate copy since the bot is a
+   different container) to enable the `/status` follow-up chat; without it
+   `/status` still works (pure sheet reads), but @mentioning the bot just
+   explains chat isn't configured instead of replying.
 3. Create a scoped, expiring Dokploy API key (Dokploy → API keys) and note
    this application's ID (its detail page in the panel).
 4. Back in GitHub, add `DOKPLOY_URL` (`https://deploy.yourdomain.com`),

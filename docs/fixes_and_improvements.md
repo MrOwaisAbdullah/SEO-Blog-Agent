@@ -655,3 +655,66 @@ only reactively:
 
 No new secrets or services needed -- reuses Tavily (already configured) and
 the same Discord webhook/bot wiring already in place.
+
+## Added: conversational status assistant in the Discord bot
+
+Per the user's request, the bot now does more than react to reactions and
+run slash commands -- it can answer questions about the pipeline and
+discuss topic ideas:
+
+- **`/status`** -- deterministic, no LLM involved. Reads all five
+  worksheets (`ContentSpark_Keywords`, `research_data`, `content_briefs`,
+  `generated_posts`, `published_posts`) via `gather_pipeline_status()` and
+  posts counts for what's queued/pending at each stage, plus a few sample
+  titles.
+- **@mention chat** -- `on_message` now responds when the bot is
+  @mentioned, running a real `Agent` (OpenAI Agents SDK, same package/pin
+  as the main pipeline) backed by `deepseek/deepseek-v4-flash-latest` on
+  OpenRouter. The agent has one tool, `get_pipeline_status_tool` (wraps the
+  same `gather_pipeline_status()` used by `/status`), which it calls itself
+  only when a question actually needs live counts -- e.g. "how many briefs
+  are waiting" triggers a sheet read, "what do you think about writing
+  about X" doesn't. Stateless per message (no session/history) for now.
+
+Initial version used a hand-rolled `requests.post` call to OpenRouter's
+chat completions endpoint with the status snapshot pre-computed and stuffed
+into the system prompt on every message. Switched to a real SDK-backed
+`Agent` with `Runner.run()` per explicit instruction -- it fetches status
+on demand via its own tool call instead of paying for a sheet read on every
+single message regardless of whether the question needs one, and is
+actually extensible (more tools can be added later) rather than a fixed
+prompt template. Verified directly against the installed `openai-agents`
+package in this repo (`Agent`/`Runner`/`function_tool`/`AsyncOpenAI`/
+`OpenAIChatCompletionsModel`/`set_tracing_disabled` all import and
+construct correctly, including a sync dict-returning `@function_tool`).
+
+The bot previously avoided the `openai-agents` SDK entirely by design (see
+the module docstring's original rationale) to stay a lightweight,
+independently-deployable container. That tradeoff was reconsidered here:
+a real per-message chat needs actual tool-calling, which is exactly what
+the SDK exists for, so the dependency was worth taking on. The bot still
+authors its own tools rather than importing the pipeline's `tools/` module,
+so the two still deploy independently -- only the SDK itself is now shared.
+
+New optional env var: `OPENROUTER_API_KEY` on the bot's Dokploy deployment
+(same key value as the pipeline's own secret, just configured separately
+since it's a different container). Without it, `/status` still works
+(pure sheet reads); @mentioning the bot just replies that chat isn't
+configured yet instead of calling anything.
+
+## Also: reduced retry counts across the pipeline (3 -> 2)
+
+Per the user's request ("try models 1 or max 2 times then move to the
+fallback"), every `max_retries` default that governs how many times an
+agent call is retried before giving up was reduced from 3 to 2:
+`custom_runner.py`'s `run_with_fallback` (retries the *entire* provider
+fallback chain this many times if every provider fails in a pass) and the
+outer per-agent retry loops in `posting_agent.py`, `research_agent.py`
+(including the new `run_topic_discovery_workflow`), and `image_agent.py`
+(each of these wraps a full `run_with_fallback` call, so the two retry
+counts previously multiplied together -- up to 3x3=9 full fallback-chain
+attempts in the worst case for a single agent call). This cuts worst-case
+wasted time/quota on a genuinely broken run roughly in half without
+removing retry coverage entirely -- a single transient hiccup still gets a
+second try, it just stops burning through the whole provider list
+repeatedly for something that isn't transient.

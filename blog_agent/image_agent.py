@@ -437,7 +437,7 @@ image_selection_agent = Agent(
     model_settings=ModelSettings(temperature=0.7)
 )
 
-async def run_image_selection_workflow(input_data: Any, max_retries: int = 3) -> Dict[str, Any]:
+async def run_image_selection_workflow(input_data: Any, max_retries: int = 2) -> Dict[str, Any]:
     """
     Executes the image selection workflow:
     1. Runs the Image Selection Agent to select or generate an image
@@ -483,7 +483,7 @@ async def run_image_selection_workflow(input_data: Any, max_retries: int = 3) ->
         logger.error(f"Error in image selection workflow: {e}", exc_info=True)
         return {"status": "error", "error": f"Unexpected error in workflow: {str(e)}"}
 
-async def run_contextual_image_insertion_workflow(input_data: Any, max_retries: int = 3) -> Dict[str, Any]:
+async def run_contextual_image_insertion_workflow(input_data: Any, max_retries: int = 2) -> Dict[str, Any]:
     """
     Executes the contextual image insertion workflow:
     1. Runs the Contextual Image Insertion Agent to insert images into content
