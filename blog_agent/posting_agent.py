@@ -94,7 +94,7 @@ preparation_agent = Agent(
     - `SUMMARY`: Ensure there is a 50–160 character SEO-friendly meta description. If the sheet includes a valid `Summary` (50–160 chars, contains primary keyword), use it. Otherwise, derive a concise meta description (50–160 chars) that includes the primary keyword, accurately summarizes the page, and is suitable for search result snippets.
       - `SLUG`: Create a URL-friendly slug from `Keyword/Topic` (e.g., `brand-consistency-in-social-media`).
       - `CATEGORIES`: Derive from `Keyword/Topic` (e.g., `["Social Media", "Branding"]`).
-      - `CONTENT_WITH_LINKS`: Use `Generated Content`.
+      - `CONTENT_WITH_LINKS`: Use `Generated Content`. TITLE is rendered as the page's own H1 above the content -- if `Generated Content` starts with a heading (`#`, `##`, or `###`) that repeats the title, remove that heading line before using it here so the title doesn't appear twice on the page. The content should start directly with the introduction, not a heading that restates the title.
       - `IMAGE_URL`: Use the `image_url` extracted from the `get_blog_image_tool` response (NOT a default/example URL).
       - `ALT_TEXT`: Use the `alt_text` extracted from the `get_blog_image_tool` response.
 
@@ -262,6 +262,46 @@ def _build_post_data_block(fields: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+_LEADING_HEADING_RE = re.compile(r"^\s*#{1,3}\s+(.+?)\s*\n", re.MULTILINE)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+
+
+def _strip_duplicate_title_heading(content: str, title: str) -> str:
+    """The page template renders TITLE as its own H1 above the content, so
+    content that also opens with a heading repeating the title shows the
+    title twice on the live page. content_generator_agent's instructions
+    already say not to do this, but that's prompt-only guidance and this
+    session has repeatedly found fallback models don't follow formatting
+    instructions reliably -- confirmed live: a real published post's content
+    started with "## <title text>". Strip it deterministically here instead
+    of trusting the prompt alone."""
+    if not content or not title:
+        return content
+    match = _LEADING_HEADING_RE.match(content)
+    if not match:
+        return content
+    heading_text = _NON_ALNUM_RE.sub("", match.group(1).lower())
+    title_text = _NON_ALNUM_RE.sub("", title.lower())
+    if not heading_text or heading_text != title_text:
+        return content
+    return content[match.end():].lstrip()
+
+
+def _extract_sanity_tool_output(run_result) -> Optional[dict]:
+    """Finds post_to_sanity_tool's actual return value in a RunResult's tool
+    call outputs, identified by its distinctive {"status", "post_id"} key
+    pair (no other tool this agent uses returns that shape). Returns None if
+    the tool was never called."""
+    new_items = getattr(run_result, "new_items", None) or []
+    for item in new_items:
+        if getattr(item, "type", None) != "tool_call_output_item":
+            continue
+        output = getattr(item, "output", None)
+        if isinstance(output, dict) and "post_id" in output and "status" in output:
+            return output
+    return None
+
+
 def _sanity_publish_already_succeeded(run_result) -> bool:
     """Confirmed live: `if "error" not in str(posting_result).lower()` treated
     a successful Sanity publish as a failure because the agent's own summary
@@ -274,18 +314,10 @@ def _sanity_publish_already_succeeded(run_result) -> bool:
     just a wasted API call.
 
     Instead of parsing narrative text, inspect the actual tool_call_output
-    items in the RunResult for post_to_sanity_tool's own return value
-    (identified by its distinctive {"status", "post_id"} key pair -- no
-    other tool this agent uses returns that shape) and trust that instead of
-    whatever the model said about it afterwards."""
-    new_items = getattr(run_result, "new_items", None) or []
-    for item in new_items:
-        if getattr(item, "type", None) != "tool_call_output_item":
-            continue
-        output = getattr(item, "output", None)
-        if isinstance(output, dict) and "post_id" in output and "status" in output:
-            return output.get("status") == "success"
-    return False
+    items in the RunResult for post_to_sanity_tool's own return value and
+    trust that instead of whatever the model said about it afterwards."""
+    output = _extract_sanity_tool_output(run_result)
+    return output is not None and output.get("status") == "success"
 
 
 # --- Function Flow Definition ---
@@ -400,6 +432,10 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                 logger.error("Preparation Agent output did not contain a parseable POST_DATA block")
                 return {"status": "error", "error": f"Preparation Agent output missing required POST_DATA fields: {preparation_output_str[:300]}"}
 
+            prep_fields["CONTENT_WITH_LINKS"] = _strip_duplicate_title_heading(
+                prep_fields["CONTENT_WITH_LINKS"], prep_fields.get("TITLE", "")
+            )
+
             # Run Contextual Image Insertion Agent with retry logic
             contextual_result = None
             for attempt in range(max_retries):
@@ -445,6 +481,11 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                     contextual_output_raw[:200],
                 )
                 post_fields = prep_fields
+
+            if "CONTENT_WITH_LINKS" in post_fields:
+                post_fields["CONTENT_WITH_LINKS"] = _strip_duplicate_title_heading(
+                    post_fields["CONTENT_WITH_LINKS"], post_fields.get("TITLE", "")
+                )
 
             # Rebuild the marker block deterministically instead of trusting
             # either agent's raw text -- guarantees the Posting Agent always
@@ -498,8 +539,14 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
             posting_output = posting_result.final_output if hasattr(posting_result, 'final_output') else str(posting_result)
 
             logger.info("Posting workflow completed.")
-            # Return the Posting Agent's output directly
-            return {"status": "completed", "data": posting_output}
+            sanity_output = _extract_sanity_tool_output(posting_result) or {}
+            return {
+                "status": "completed",
+                "data": posting_output,
+                "title": post_fields.get("TITLE"),
+                "post_url": sanity_output.get("post_url"),
+                "post_id": sanity_output.get("post_id"),
+            }
 
     except Exception as e:
         logger.error(f"Error in posting workflow: {e}", exc_info=True)

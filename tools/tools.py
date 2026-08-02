@@ -693,6 +693,7 @@ def post_to_sanity_tool(
             return {
                 "status": "success",
                 "post_id": result["post_id"],
+                "post_url": result.get("post_url"),
                 "image_id": result.get("image_id"),
                 "image_url": result.get("image_url"),
                 "image_source": image_source,

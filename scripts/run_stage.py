@@ -574,6 +574,16 @@ async def run_post() -> None:
     if isinstance(result, dict) and result.get("status") == "error":
         raise RuntimeError(f"Posting stage failed: {result.get('error')}")
 
+    if isinstance(result, dict) and result.get("post_url"):
+        webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+        if webhook_url:
+            title = result.get("title") or "Untitled"
+            content = f"🌐 Published **{title}**\n{result['post_url']}"
+            try:
+                _post_discord_message(webhook_url, content)
+            except Exception as e:
+                print(f"Failed to send Discord publish notification: {e}")
+
 
 STAGE_HANDLERS = {
     "research": run_research,
@@ -596,9 +606,10 @@ def main() -> None:
         _notify_discord_status(args.stage, success=False, detail=str(e))
         sys.exit(1)
     else:
-        # "content" already gets a richer draft-ready notification via
-        # _notify_discord; a generic success ping on top would just be noise.
-        if args.stage != "content":
+        # "content" and "post" already get their own richer notifications
+        # (draft-ready / published-with-URL); a generic success ping on top
+        # would just be noise.
+        if args.stage not in ("content", "post"):
             _notify_discord_status(args.stage, success=True)
 
 
