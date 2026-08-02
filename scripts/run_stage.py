@@ -358,6 +358,26 @@ def _ensure_brief_persisted(brief: dict) -> None:
         print(f"[brief] Marked research_data row {lookup['row_index']} as Generated=Yes for '{keyword}'.")
 
 
+def _tool_call_succeeded(run_result, expect_in_message: str) -> bool:
+    """Scans a RunResult's actual tool_call_output items for a
+    manage_sheet_data-shaped success whose message contains
+    expect_in_message. Confirmed live: a fallback model can execute every
+    required tool call correctly (append_row to content_briefs, update_cell
+    on research_data) and then summarize the result as plain narrative text
+    instead of the documented JSON envelope -- treating "not JSON" as an
+    automatic failure in that case would raise on a run that had already
+    fully succeeded. Check what actually happened via the tool outputs
+    instead of requiring the final answer to be in any particular format."""
+    new_items = getattr(run_result, "new_items", None) or []
+    for item in new_items:
+        if getattr(item, "type", None) != "tool_call_output_item":
+            continue
+        output = getattr(item, "output", None)
+        if isinstance(output, dict) and output.get("status") == "success" and expect_in_message in str(output.get("message", "")):
+            return True
+    return False
+
+
 async def run_brief() -> None:
     result = await custom_runner.run_with_fallback(
         brief_agent,
@@ -366,21 +386,28 @@ async def run_brief() -> None:
     )
     output = str(getattr(result, "final_output", result))
     print(f"[brief] result: {output}")
-    if _agent_output_indicates_error(output) and not _is_benign_empty(output):
-        raise RuntimeError(f"Brief stage failed: {output}")
 
     if _is_benign_empty(output):
         return
 
     parsed = _parse_agent_json(output)
-    if not parsed:
-        if _looks_like_unexecuted_tool_call(output):
-            raise RuntimeError(
-                "Brief stage failed: model returned an unexecuted tool call instead of a brief "
-                f"(Cohere compatibility-layer glitch, nothing to salvage) -- retry the stage. Raw: {output}"
-            )
-        raise RuntimeError(f"Brief stage reported success but produced unparseable output: {output[:300]}")
-    _ensure_brief_persisted(parsed)
+    if parsed is not None:
+        if _get_field(parsed, "status") == "error":
+            raise RuntimeError(f"Brief stage failed: {output}")
+        _ensure_brief_persisted(parsed)
+        return
+
+    # Not JSON. Before treating this as a failure, check whether the
+    # agent's own tool calls already saved everything correctly.
+    if _tool_call_succeeded(result, "Row appended to content_briefs"):
+        print("[brief] Final answer wasn't JSON, but content_briefs was already updated via a real tool call -- treating as success.")
+        return
+    if _looks_like_unexecuted_tool_call(output):
+        raise RuntimeError(
+            "Brief stage failed: model returned an unexecuted tool call instead of a brief "
+            f"(no content to salvage) -- retry the stage. Raw: {output}"
+        )
+    raise RuntimeError(f"Brief stage reported success but produced unparseable output: {output[:300]}")
 
 
 _TITLE_HEADING_RE = re.compile(r"^#{1,3}\s+(.+?)\s*\n", re.MULTILINE)
@@ -479,15 +506,16 @@ def _extract_content_from_markdown(output: str) -> Optional[dict]:
 
 
 def _looks_like_unexecuted_tool_call(output: str) -> bool:
-    """Detects a specific, confirmed-live Cohere failure mode: its OpenAI
-    compatibility layer occasionally leaks a tool call it never actually
-    executed as plain-text JSON (e.g. a list of
+    """Detects a fallback model's OpenAI-compatibility layer leaking a tool
+    call it never actually executed as plain-text JSON (e.g. a list of
     {"tool_call_id", "tool_name", "parameters"} objects) instead of running
     tavily_search_tool/etc. through the SDK's real function-calling
-    protocol. There's no content to salvage here -- unlike a missing JSON
-    envelope, this genuinely has no post in it -- but flagging the pattern
-    explicitly makes the failure instantly recognizable instead of just
-    dumping the raw JSON as an opaque error."""
+    protocol (confirmed live, previously via Cohere before it was removed
+    as a provider -- kept as a general check since any OpenAI-compatibility
+    shim could in principle do the same). There's no content to salvage
+    here -- unlike a missing JSON envelope, this genuinely has no post in
+    it -- but flagging the pattern explicitly makes the failure instantly
+    recognizable instead of just dumping the raw JSON as an opaque error."""
     try:
         parsed = json.loads(output.strip())
     except (json.JSONDecodeError, TypeError):
@@ -559,15 +587,32 @@ async def run_content() -> None:
             raise RuntimeError(f"Content stage failed: {output}")
     else:
         # Not JSON at all -- try to salvage a raw Markdown post before
-        # treating this as a genuine failure. Confirmed live: Cohere
-        # sometimes skips the documented JSON envelope entirely and just
-        # returns the finished post as plain text.
+        # treating this as a genuine failure. Confirmed live: a fallback
+        # model sometimes skips the documented JSON envelope entirely and
+        # just returns the finished post as plain text.
         parsed = _extract_content_from_markdown(output)
         if parsed is None:
+            # Still not salvageable as text -- before giving up, check
+            # whether the agent's own tool calls already saved everything
+            # correctly (confirmed live for the brief stage: a model can
+            # execute append_row successfully and then just summarize the
+            # result as a plain sentence with nothing to parse at all).
+            if _tool_call_succeeded(result, "Row appended to generated_posts"):
+                print("[content] Final answer wasn't JSON/Markdown, but generated_posts was already updated via a real tool call -- reading back the saved row.")
+                records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+                if records.get("status") == "success" and records.get("data"):
+                    last_row = records["data"][-1]
+                    _notify_discord(
+                        title=last_row.get("Title", "Untitled"),
+                        summary=last_row.get("Summary", ""),
+                        content=last_row.get("Generated Content", ""),
+                        faqs=last_row.get("FAQs", ""),
+                    )
+                return
             if _looks_like_unexecuted_tool_call(output):
                 raise RuntimeError(
                     "Content stage failed: model returned an unexecuted tool call instead of "
-                    f"content (Cohere compatibility-layer glitch, no post to salvage) -- retry the stage. Raw: {output}"
+                    f"content (no post to salvage) -- retry the stage. Raw: {output}"
                 )
             raise RuntimeError(f"Content stage failed: {output}")
         print("[content] Agent returned raw Markdown instead of the JSON envelope; salvaged it instead of discarding a completed post.")

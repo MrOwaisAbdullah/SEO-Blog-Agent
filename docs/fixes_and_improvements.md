@@ -882,3 +882,44 @@ transitively imports `image_agent.py` (which is most of the pipeline, via
 constructing `FallbackAgentRunner()` after the removal, rather than just
 grepping for the word "cohere" in strings. Both switched to
 `gemini-flash-latest`, the same default used elsewhere in each file.
+
+## False-positive brief failure: real success, plain-text final answer
+
+Live re-test after the Cohere removal: the `brief` stage failed with
+`Stage 'brief' failed: The content brief has been successfully created and
+saved to the content_briefs worksheet. The original research row in
+research_data has also been updated to mark it as generated.` -- a
+narrative sentence claiming success, not JSON. `_agent_output_indicates_error`
+treated "not valid JSON" as an automatic failure and raised before the
+brief's actual persistence logic ever ran.
+
+Checked the full tool-call log for this run: the claim was **true**.
+`manage_sheet_data_tool` really did return `{'status': 'success', 'message':
+'Row appended to content_briefs.'}` and later `{'status': 'success',
+'message': 'Cell (4, 8) updated in research_data.'}` -- the agent (after a
+couple of self-corrected malformed tool-call attempts, visible in the same
+log) did everything right and just described it in a sentence instead of
+JSON. Failing the stage over that was a real regression: the brief was
+already safely saved, and the run still reported itself as a failure.
+
+Fixed with `_tool_call_succeeded(run_result, expect_in_message)`: scans
+`RunResult.new_items` for an actual `manage_sheet_data`-shaped success
+whose message contains the expected substring (e.g. "Row appended to
+content_briefs"), independent of whatever the final answer's text/format
+looks like. `run_brief()` was restructured to check this before giving up
+on non-JSON output (mirroring `run_content()`'s JSON -> Markdown-salvage
+cascade, now JSON -> tool-call-verified -> genuine failure), and
+`run_content()` got the same check added as a third fallback path before
+its own final failure, reading back the row from the sheet directly for
+the Discord notification since there's no parsed dict to work from in that
+path. Also generalized the two "Cohere compatibility-layer glitch" error
+messages (`_looks_like_unexecuted_tool_call` call sites) to not name Cohere
+anymore, since it's no longer a provider in this pipeline and the pattern
+could in principle come from any OpenAI-compatibility shim.
+
+This closes out the same lesson that's run through this whole session,
+generalized one more time: **the model's own account of what happened is
+not the source of truth for whether a stage succeeded -- the actual tool
+call outputs are.** Every "false failure" and "false success" bug fixed in
+this document came from trusting narrative text (JSON or not) over what
+the tools actually returned.
