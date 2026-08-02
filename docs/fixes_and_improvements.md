@@ -547,3 +547,37 @@ The fix pattern going forward is the same each time: keep the agent's
 instructions asking it to save (it works fine most of the time, on Gemini
 especially), but never let the *stage's* definition of success depend on
 trusting that it did -- verify or do it deterministically in Python instead.
+
+## Fourth live issue: `post` stage failing with "project_id, dataset, and token must be provided"
+
+Real failure: the `post` stage failed every attempt with
+`Unexpected error in post_to_sanity_tool: project_id, dataset, and token
+must be provided.` even though `SANITY_PROJECT_ID` and `SANITY_API_TOKEN`
+were both set as GitHub repo secrets (confirmed via `gh secret list`).
+
+Root cause: `SANITY_DATASET` was never added as a repo secret at all.
+`pipeline.yml` unconditionally sets `SANITY_DATASET: ${{ secrets.SANITY_DATASET
+}}` in the job env -- and GitHub Actions resolves a reference to a
+**non-existent** secret to an **empty string**, not an omitted key. So the
+env var `SANITY_DATASET` existed in the runner's environment with value
+`""`. `tools/tools.py` read it with
+`os.environ.get('SANITY_DATASET', 'production')` -- but `dict.get(key,
+default)` only returns the default when the key is **absent**, not when
+it's present with a falsy value, so this returned `""` instead of falling
+back to `'production'`. `SanityAdapter.__init__` then rejected the empty
+string (`if not all([project_id, dataset, token])`).
+
+Fixed in both call sites in `tools/tools.py` (`post_to_sanity_tool` and
+`fetch_internal_links_tool`): `os.environ.get('SANITY_DATASET') or
+"production"` instead of the two-arg `.get()` form, so both "the secret was
+never set" and "the secret exists but is empty" fall back correctly. Per
+the user, this project only ever publishes to the `production` dataset, so
+the env var is really just an override knob, not something that needs its
+own secret configured going forward.
+
+General takeaway: `os.environ.get(key, default)` is not a safe pattern for
+any GitHub Actions secret that might not be configured, specifically
+because Actions' `${{ secrets.X }}` syntax never errors on an unset secret
+-- it silently substitutes an empty string. Anywhere in this codebase that
+does `os.environ.get(key, default)` for an *optional* secret should really
+be `os.environ.get(key) or default`.

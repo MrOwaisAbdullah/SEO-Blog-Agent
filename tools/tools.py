@@ -565,7 +565,12 @@ def post_to_sanity_tool(
         # Initialize SanityAdapter
         adapter = SanityAdapter(
             project_id=os.environ['SANITY_PROJECT_ID'],
-            dataset=os.environ.get('SANITY_DATASET', 'production'),
+            # GitHub Actions resolves ${{ secrets.SANITY_DATASET }} to an empty
+            # string (not an absent key) when the secret isn't configured, so
+            # os.environ.get(key, default) never falls through to 'production'
+            # -- the key exists in os.environ, just with an empty value. Use
+            # `or` instead so both "unset" and "set but empty" fall back.
+            dataset=os.environ.get('SANITY_DATASET') or "production",
             token=os.environ['SANITY_API_TOKEN']
         )
 
@@ -761,7 +766,12 @@ def fetch_internal_links_tool(topic: str, max_results: int = 3, exclude_slug: st
     try:
         adapter = SanityAdapter(
             project_id=os.environ['SANITY_PROJECT_ID'],
-            dataset=os.environ.get('SANITY_DATASET', 'production'),
+            # GitHub Actions resolves ${{ secrets.SANITY_DATASET }} to an empty
+            # string (not an absent key) when the secret isn't configured, so
+            # os.environ.get(key, default) never falls through to 'production'
+            # -- the key exists in os.environ, just with an empty value. Use
+            # `or` instead so both "unset" and "set but empty" fall back.
+            dataset=os.environ.get('SANITY_DATASET') or "production",
             token=os.environ['SANITY_API_TOKEN']
         )
         links = adapter.fetch_internal_links(topic=topic, max_results=max_results, exclude_slug=exclude_slug)

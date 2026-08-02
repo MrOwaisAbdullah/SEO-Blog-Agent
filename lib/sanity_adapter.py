@@ -529,8 +529,12 @@ class SanityAdapter:
         
         try:
             # 1. Use existing author from your project (configured via environment variables)
-            author_id = os.environ.get("SANITY_DEFAULT_AUTHOR_ID", "default-author-id")
-            author_name = os.environ.get("SANITY_DEFAULT_AUTHOR_NAME", "Admin")
+            # `or` rather than the two-arg .get() form: an unset GitHub Actions
+            # secret resolves to an empty string, not an absent key, so the
+            # two-arg form would silently pass "" through instead of falling
+            # back to these defaults (see docs/fixes_and_improvements.md).
+            author_id = os.environ.get("SANITY_DEFAULT_AUTHOR_ID") or "default-author-id"
+            author_name = os.environ.get("SANITY_DEFAULT_AUTHOR_NAME") or "Admin"
             # Ensure the author exists (this will just verify it exists)
             self.ensure_document_exists("author", author_id, {"name": author_name})
 

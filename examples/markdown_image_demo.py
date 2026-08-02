@@ -119,7 +119,7 @@ Regularly review your content performance and make improvements based on data.
         # Initialize Sanity adapter
         adapter = SanityAdapter(
             project_id=os.environ['SANITY_PROJECT_ID'],
-            dataset=os.environ.get('SANITY_DATASET', 'production'),
+            dataset=os.environ.get('SANITY_DATASET') or "production",
             token=os.environ['SANITY_API_TOKEN']
         )
         
