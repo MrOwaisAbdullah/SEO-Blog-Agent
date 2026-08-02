@@ -1,9 +1,10 @@
 import logging
 import re
-from agents import Agent, ModelSettings, AgentHooks, handoff, trace
+from agents import Agent, ModelSettings, handoff, trace
 from tools.tools import post_to_sanity_tool, fetch_internal_links_tool, get_stock_image_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
 from blog_agent.image_agent import image_selection_agent, contextual_image_insertion_agent  # Import the new image agent tools
+from blog_agent.hooks import MyAgentHooks
 from typing import Dict, Any, List, Optional
 import json
 import asyncio
@@ -17,13 +18,14 @@ custom_runner = FallbackAgentRunner()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Hooks (Optional, can be shared or specific) ---
-class MyAgentHooks(AgentHooks):
-    async def on_agent_start(self, context, agent):
-        logger.info(f"[Hook] Agent start: {agent.name}")
-
-    async def on_agent_end(self, context, agent, result):
-        logger.info(f"[Hook] Agent end: {agent.name}")
+# This module used to define its own local MyAgentHooks -- print()-free,
+# logger.info()-only, no on_tool_start/on_tool_end at all -- which meant
+# every tool call made by Preparation/Posting Agent (including the whole
+# Freepik -> Cloudflare -> Pexels image chain, called deep inside
+# get_blog_image_tool) was completely invisible in the logs. Switched to
+# the shared, richer hooks class from blog_agent/hooks.py (used by
+# Brief/Content/Research agents already) instead of keeping a second,
+# weaker class with the same name.
 
 # --- Helper/Preparation Agent ---
 # This agent's job is to find the next post, prepare content (links, image).

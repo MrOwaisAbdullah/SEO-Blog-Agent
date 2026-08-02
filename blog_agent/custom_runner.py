@@ -30,8 +30,9 @@ from datetime import datetime, timedelta
 class FallbackAgentRunner(AgentRunner):
     def __init__(self):
         super().__init__()
-        # LLM model configurations
-        # Gemini models share a single quota; other providers have their own
+        # LLM model configurations. Quota is tracked per model name below,
+        # not per provider -- Gemini's two models here have very different
+        # daily limits from each other (see the comment on model_limits).
         self.LLM_MODELS = [
             {"name": "gemini-flash-latest", "model": "gemini-flash-latest", "provider": "gemini"},
             {"name": "gemini-flash-lite-latest", "model": "gemini-flash-lite-latest", "provider": "gemini"},
@@ -75,32 +76,57 @@ class FallbackAgentRunner(AgentRunner):
             {"name": "deepseek-v4-flash", "model": "~deepseek/deepseek-v4-flash-latest", "provider": "openrouter-paid"},
         ]
 
-        # Quota tracking at provider level
-        self.model_usage = {"gemini": 0, "openrouter": 0, "openrouter-paid": 0}
-        # Approximate daily limits. Gemini's free-tier limit is per specific
-        # model, not a flat account-wide number -- confirmed live from a real
-        # 429 response: "generativelanguage.googleapis.com/generate_content_
-        # free_tier_requests... quotaValue: 20" for whatever model
-        # gemini-flash-latest currently resolves to. 50 was an earlier,
-        # too-optimistic guess; lowered so the code proactively switches
-        # providers before hitting the real cap instead of burning retries
-        # on repeated 429s. openrouter's free tier is 50/day without ever
-        # having purchased credits (1000/day only applies once you've bought
-        # $10+ in credits at some point, which isn't "free" anymore).
-        # openrouter-paid has no real daily cap (it's pay-per-token, not
-        # quota-limited) -- the number below is just a sanity ceiling.
-        self.model_limits = {"gemini": 20, "openrouter": 50, "openrouter-paid": 1000}
+        # Quota tracking is keyed by MODEL NAME, not provider. Confirmed via
+        # Google AI Studio's own rate-limits dashboard: quota is per model,
+        # and it is NOT close to uniform across the Gemini lineup -- e.g.
+        # "Gemini 3.6 Flash" (what gemini-flash-latest currently resolves
+        # to) is capped at 20 requests/day, while "Gemini 3.5 Flash Lite"
+        # (what gemini-flash-lite-latest currently resolves to) gets 500/day,
+        # a 25x difference. Treating both under one shared "gemini" bucket
+        # (the previous design) meant hitting gemini-flash-latest's tight
+        # 20/day cap made the code treat gemini-flash-lite-latest as
+        # exhausted too, even though it still had ~480 requests of its own
+        # quota left untouched.
+        self.model_usage = {
+            "gemini-flash-latest": 0,
+            "gemini-flash-lite-latest": 0,
+            "openrouter-free": 0,
+            "deepseek-v4-flash": 0,
+        }
+        # Confirmed live from the actual dashboard (peak usage vs. limit,
+        # trailing 28 days) rather than guessed: gemini-flash-latest = 20/day
+        # (also independently confirmed from a real 429's quotaValue field),
+        # gemini-flash-lite-latest = 500/day. openrouter-free is 50/day
+        # without ever having purchased credits (1000/day only applies once
+        # $10+ in credits have been bought at some point, which isn't "free"
+        # anymore). deepseek-v4-flash (paid, last-resort) has no real daily
+        # cap -- pay-per-token, not quota-limited -- the number is just a
+        # sanity ceiling.
+        self.model_limits = {
+            "gemini-flash-latest": 20,
+            "gemini-flash-lite-latest": 500,
+            "openrouter-free": 50,
+            "deepseek-v4-flash": 1000,
+        }
         self.last_reset = datetime.now()
 
-        # Provider performance tracking
+        # Per-model performance tracking (used to sort which model to try first)
         self.provider_stats = {
-            "gemini": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            "openrouter": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            "openrouter-paid": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "gemini-flash-latest": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "gemini-flash-lite-latest": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "openrouter-free": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
+            "deepseek-v4-flash": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
         }
 
-        # Temporary provider unavailability tracking
-        self.provider_unavailable_until = {"gemini": None, "openrouter": None, "openrouter-paid": None}
+        # Temporary per-model unavailability tracking -- a rate-limit on
+        # gemini-flash-latest no longer marks gemini-flash-lite-latest
+        # unavailable too, since they draw from independent quota pools.
+        self.provider_unavailable_until = {
+            "gemini-flash-latest": None,
+            "gemini-flash-lite-latest": None,
+            "openrouter-free": None,
+            "deepseek-v4-flash": None,
+        }
 
     def get_gemini_client(self):
         from agents import AsyncOpenAI
@@ -160,37 +186,39 @@ class FallbackAgentRunner(AgentRunner):
         available_models = [m["name"] for m in self.LLM_MODELS + self.LAST_RESORT_MODELS]
         raise ValueError(f"Model name '{model_name}' not found in LLM_MODELS. Available models: {available_models}")
 
-    async def is_model_available(self, provider_name):
-        """Check if the provider has quota remaining and is not temporarily unavailable."""
+    async def is_model_available(self, model_name):
+        """Check if this specific model has quota remaining and is not
+        temporarily unavailable. Keyed by model name, not provider -- see
+        the comment on model_limits for why (per-model quota, not shared)."""
         # Reset usage daily
         if (datetime.now() - self.last_reset).days >= 1:
-            print(f"Resetting daily usage counters for all providers")
-            self.model_usage = {"gemini": 0, "openrouter": 0, "openrouter-paid": 0}
+            print(f"Resetting daily usage counters for all models")
+            self.model_usage = {name: 0 for name in self.model_usage}
             self.last_reset = datetime.now()
-        
-        # Check if provider is temporarily unavailable
-        if self.provider_unavailable_until[provider_name] is not None:
-            if datetime.now() < self.provider_unavailable_until[provider_name]:
-                print(f"Provider {provider_name} is temporarily unavailable")
+
+        # Check if this model is temporarily unavailable
+        if self.provider_unavailable_until.get(model_name) is not None:
+            if datetime.now() < self.provider_unavailable_until[model_name]:
+                print(f"Model {model_name} is temporarily unavailable")
                 return False
             else:
                 # Reset unavailability
-                self.provider_unavailable_until[provider_name] = None
-        
-        current_usage = self.model_usage.get(provider_name, 0)
-        limit = self.model_limits.get(provider_name, 0)
+                self.provider_unavailable_until[model_name] = None
+
+        current_usage = self.model_usage.get(model_name, 0)
+        limit = self.model_limits.get(model_name, 0)
         available = current_usage < limit - 5
-        
-        print(f"Provider {provider_name}: {current_usage}/{limit} calls used, available: {available}")
+
+        print(f"Model {model_name}: {current_usage}/{limit} calls used, available: {available}")
         return available
 
-    async def increment_usage(self, provider_name):
-        """Increment usage for the provider."""
-        if provider_name in self.model_usage:
-            self.model_usage[provider_name] += 1
-            print(f"Incremented usage for {provider_name}: {self.model_usage[provider_name]}")
+    async def increment_usage(self, model_name):
+        """Increment usage for this specific model."""
+        if model_name in self.model_usage:
+            self.model_usage[model_name] += 1
+            print(f"Incremented usage for {model_name}: {self.model_usage[model_name]}")
         else:
-            print(f"Warning: Unknown provider {provider_name}")
+            print(f"Warning: Unknown model {model_name}")
 
     def is_llm_error(self, e):
         msg = str(e).lower()
@@ -281,7 +309,7 @@ class FallbackAgentRunner(AgentRunner):
 
             for model_config in sorted_models:
                 try:
-                    if not await self.is_model_available(model_config["provider"]):
+                    if not await self.is_model_available(model_config["name"]):
                         continue
                     agent.model = self.get_model_by_name(model_config["name"])
                     print(f"[Fallback] Trying agent '{agent.name}' with model '{model_config['name']}' (attempt {attempt + 1})")
@@ -298,13 +326,13 @@ class FallbackAgentRunner(AgentRunner):
                         session=None,
                     )
                     response_time = (datetime.now() - start_time).total_seconds()
-                    await self._update_provider_stats(model_config["provider"], True, response_time)
-                    await self.increment_usage(model_config["provider"])
+                    await self._update_provider_stats(model_config["name"], True, response_time)
+                    await self.increment_usage(model_config["name"])
                     print(f"[DEBUG] Agent '{agent.name}' run complete.")
                     return result
                 except Exception as e:
                     response_time = (datetime.now() - start_time).total_seconds() if 'start_time' in locals() else 0.0
-                    await self._update_provider_stats(model_config["provider"], False, response_time)
+                    await self._update_provider_stats(model_config["name"], False, response_time)
 
                     if not self.is_llm_error(e):
                         print(f"[Fallback] Non-LLM error: {e} -- not retrying fallback.")
@@ -314,13 +342,13 @@ class FallbackAgentRunner(AgentRunner):
                     last_error = e
 
                     if self.is_permanent_error(e):
-                        print(f"[Fallback] Permanent error detected for provider {model_config['provider']}. Marking as temporarily unavailable.")
-                        self.provider_unavailable_until[model_config["provider"]] = datetime.now() + timedelta(minutes=5)
+                        print(f"[Fallback] Permanent error detected for model {model_config['name']}. Marking as temporarily unavailable.")
+                        self.provider_unavailable_until[model_config["name"]] = datetime.now() + timedelta(minutes=5)
                         continue
 
                     if "rate limit" in str(e).lower() or "429" in str(e):
-                        print(f"[Fallback] Rate limit error detected for provider {model_config['provider']}. Marking as temporarily unavailable.")
-                        self.provider_unavailable_until[model_config["provider"]] = datetime.now() + timedelta(minutes=10)
+                        print(f"[Fallback] Rate limit error detected for model {model_config['name']}. Marking as temporarily unavailable.")
+                        self.provider_unavailable_until[model_config["name"]] = datetime.now() + timedelta(minutes=10)
                         continue
 
                     continue
@@ -338,8 +366,8 @@ class FallbackAgentRunner(AgentRunner):
 
     def _sort_models_by_performance(self):
         """Sort models by performance (success rate and response time)."""
-        def performance_score(provider_name):
-            stats = self.provider_stats.get(provider_name, {"success_count": 0, "error_count": 0, "avg_response_time": 0.0})
+        def performance_score(model_name):
+            stats = self.provider_stats.get(model_name, {"success_count": 0, "error_count": 0, "avg_response_time": 0.0})
             total_requests = stats["success_count"] + stats["error_count"]
             if total_requests == 0:
                 # No data, return neutral score
@@ -352,14 +380,14 @@ class FallbackAgentRunner(AgentRunner):
             return 0.7 * success_rate + 0.3 * response_time_score
 
         # Sort models by performance score (descending)
-        return sorted(self.LLM_MODELS, key=lambda m: performance_score(m["provider"]), reverse=True)
+        return sorted(self.LLM_MODELS, key=lambda m: performance_score(m["name"]), reverse=True)
 
-    async def _update_provider_stats(self, provider_name, success, response_time):
-        """Update provider statistics for performance tracking."""
-        if provider_name not in self.provider_stats:
+    async def _update_provider_stats(self, model_name, success, response_time):
+        """Update per-model statistics for performance tracking."""
+        if model_name not in self.provider_stats:
             return
-            
-        stats = self.provider_stats[provider_name]
+
+        stats = self.provider_stats[model_name]
         total_requests = stats["success_count"] + stats["error_count"]
         
         if success:
@@ -374,7 +402,7 @@ class FallbackAgentRunner(AgentRunner):
             # Running average
             stats["avg_response_time"] = (stats["avg_response_time"] * total_requests + response_time) / (total_requests + 1)
             
-        print(f"[Stats] Provider {provider_name}: Success rate={(stats['success_count']/(stats['success_count']+stats['error_count'])):.2f}, Avg response time={stats['avg_response_time']:.2f}s")
+        print(f"[Stats] Model {model_name}: Success rate={(stats['success_count']/(stats['success_count']+stats['error_count'])):.2f}, Avg response time={stats['avg_response_time']:.2f}s")
 
     async def _execute_agent_run(self, agent, input_data, context=None, max_turns=15, hooks=None, session=None):
         """Helper wrapper that actually invokes the parent AgentRunner.run.

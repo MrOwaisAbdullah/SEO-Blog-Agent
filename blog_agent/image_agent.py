@@ -16,6 +16,7 @@ from io import BytesIO
 from PIL import Image
 import base64
 from blog_agent.custom_runner import FallbackAgentRunner
+from blog_agent.hooks import MyAgentHooks
 
 # Create a custom runner instance to access the get_model_by_name method
 custom_runner = FallbackAgentRunner()
@@ -101,6 +102,7 @@ image_quality_evaluation_agent = Agent(
     # codebase, so it's a zero-new-cost, zero-new-dependency replacement.
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.3),  # Lower temperature for more consistent evaluations
+    hooks=MyAgentHooks(),
 )
 
 
@@ -311,6 +313,7 @@ contextual_image_insertion_agent = Agent(
     ],
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.7),
+    hooks=MyAgentHooks(),
 )
 
 
@@ -438,7 +441,8 @@ image_selection_agent = Agent(
     # ValueError at the first call. Switched to the same default used
     # elsewhere in this file rather than leaving it on a removed provider.
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
-    model_settings=ModelSettings(temperature=0.7)
+    model_settings=ModelSettings(temperature=0.7),
+    hooks=MyAgentHooks(),
 )
 
 async def run_image_selection_workflow(input_data: Any, max_retries: int = 2) -> Dict[str, Any]:

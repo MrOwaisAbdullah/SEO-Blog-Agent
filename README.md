@@ -63,8 +63,9 @@ TAVILY_API_KEY=your_tavily_api_key
 SERPAPI_KEY=your_serpapi_key
 
 # Image API Keys
-FREEPIC_API_KEY=your_freepik_api_key
 PEXELS_API_KEY=your_pexels_api_key
+CLOUDFLARE_ACCOUNT_ID=your_cloudflare_account_id
+CLOUDFLARE_API_TOKEN=your_cloudflare_workers_ai_token
 
 # Security
 API_KEY=your_custom_api_key_for_authentication
@@ -97,7 +98,7 @@ DEFAULT_MODEL=gemini-2.5-flash
 - `SERPAPI_KEY` - SerpAPI key for search data (fallback)
 
 #### Image API Keys
-- `FREEPIC_API_KEY` - Freepik API key for image generation (primary; one-time trial credit, not an ongoing free tier)
+- `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` - Cloudflare Workers AI for AI image generation (primary; genuinely free, 10,000 Neurons/day)
 - `PEXELS_API_KEY` - Pexels API key for stock images (fallback)
 
 #### Security

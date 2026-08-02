@@ -7,8 +7,14 @@ name: ContentSpark Pipeline
 # Schedule mirrors the original staggered PKT design (research -> brief ->
 # content -> post), converted to UTC (PKT = UTC+5). The gap between "content"
 # and "post" is intentional -- that's the window for Discord approval.
+# discover_topics runs every ~2 days rather than daily: it proposes 4-5
+# candidates per run (each needing a Discord ✅/❌ approval, never
+# auto-queued), which is roughly 2 days' worth of research's one-keyword-
+# per-day consumption -- running it daily would just pile up unreviewed
+# candidates faster than they get approved.
 on:
   schedule:
+    - cron: '0 1 */2 * *'  # discover_topics -- every ~2 days, 6:00 AM PKT (before research)
     - cron: '0 3 * * *'  # research -- 8:00 AM PKT
     - cron: '0 5 * * *'  # brief    -- 10:00 AM PKT
     - cron: '0 7 * * *'  # content  -- 12:00 PM PKT
@@ -40,6 +46,7 @@ jobs:
             echo "stage=${{ github.event.inputs.stage }}" >> "$GITHUB_OUTPUT"
           else
             case "${{ github.event.schedule }}" in
+              '0 1 */2 * *') echo "stage=discover_topics" >> "$GITHUB_OUTPUT" ;;
               '0 3 * * *') echo "stage=research" >> "$GITHUB_OUTPUT" ;;
               '0 5 * * *') echo "stage=brief" >> "$GITHUB_OUTPUT" ;;
               '0 7 * * *') echo "stage=content" >> "$GITHUB_OUTPUT" ;;
@@ -63,7 +70,6 @@ jobs:
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          FREEPIC_API_KEY: ${{ secrets.FREEPIC_API_KEY }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           SANITY_PROJECT_ID: ${{ secrets.SANITY_PROJECT_ID }}

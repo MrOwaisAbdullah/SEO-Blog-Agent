@@ -432,10 +432,11 @@ def _generate_image_cloudflare(prompt: str, keyword: str) -> Optional[Dict[str, 
 
 @function_tool
 def generate_image_tool(keyword: str, custom_prompt: str = None):
-    """Generates an image for a blog post using the Freepik API (primary) or
-    Cloudflare Workers AI (free fallback). On failure, returns an error dict --
-    the calling agent (image_selection_agent) is instructed to fall back to
-    get_stock_image_tool rather than this function retrying internally."""
+    """Generates an image for a blog post using Cloudflare Workers AI
+    (genuinely free, no credit card, no per-key credential fragility). On
+    failure, returns an error dict -- the calling agent (image_selection_agent)
+    is instructed to fall back to get_stock_image_tool rather than this
+    function retrying internally."""
 
     # Use custom prompt if provided, otherwise create a diverse, creative prompt
     if custom_prompt:
@@ -459,75 +460,11 @@ def generate_image_tool(keyword: str, custom_prompt: str = None):
         prompt = random.choice(prompt_templates)
         logger.info(f"Generated diverse prompt for '{keyword}': {prompt}")
 
-    # Try Freepik (primary) - Using the correct Flux Dev API
-    try:
-        url = "https://api.freepik.com/v1/ai/text-to-image/flux-dev"
-        headers = {
-            "x-freepik-api-key": os.environ["FREEPIC_API_KEY"],
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        # Updated payload to match Freepik API documentation
-        payload = {
-            "prompt": prompt,
-            "aspect_ratio": "widescreen_16_9"
-        }
-        # Debug: Print the payload for troubleshooting
-        logger.debug(f"Freepik API Payload: {json.dumps(payload, indent=2)}")
-        response = requests.post(url, json=payload, headers=headers)
-        logger.debug(f"Freepik API Response Status: {response.status_code}")
-        logger.debug(f"Freepik API Response Text: {response.text}")
-        response.raise_for_status()
-        task_response = response.json()
-        
-        # Import time module here to fix scope issue
-        import time
-        
-        # Check if we got an immediate result or need to poll
-        if "data" in task_response and "generated" in task_response["data"] and task_response["data"]["generated"]:
-            # Immediate result - return URL directly for Freepik
-            image_url = task_response["data"]["generated"][0]
-            logger.info(f"Successfully retrieved image URL from Freepik: {image_url}")
-            # Return in format expected by image_selection_agent
-            return {"image_url": image_url, "alt_text": f"{keyword} illustration", "source": "Freepik", "evaluation_score": 9.0, "feedback": "High quality image from Freepik"}
-        elif "data" in task_response and "task_id" in task_response["data"]:
-            # Need to poll for result
-            task_id = task_response["data"]["task_id"]
-
-            # Poll for completion
-            poll_url = f"https://api.freepik.com/v1/ai/text-to-image/flux-dev/{task_id}"
-            for _ in range(30):  # Poll up to 30 times (increased from 15)
-                time.sleep(10)  # Wait 10 seconds between polls (reduced from 15)
-                try:
-                    poll_response = requests.get(poll_url, headers=headers)
-                    poll_response.raise_for_status()
-                    task_status = poll_response.json()
-                    
-                    if "data" in task_status and "status" in task_status["data"]:
-                        status = task_status["data"]["status"]
-                        if status == "COMPLETED" and "generated" in task_status["data"] and task_status["data"]["generated"]:
-                            # Completed - return URL directly for Freepik
-                            image_url = task_status["data"]["generated"][0]
-                            logger.info(f"Successfully retrieved image URL from Freepik: {image_url}")
-                            # Return in format expected by image_selection_agent
-                            return {"image_url": image_url, "alt_text": f"{keyword} illustration", "source": "Freepik", "evaluation_score": 9.0, "feedback": "High quality image from Freepik"}
-                        elif status == "FAILED":
-                            logger.error("Freepik image generation failed (task status FAILED)")
-                            break
-                except Exception as poll_error:
-                    logger.error(f"Error polling Freepik API: {poll_error}")
-                    continue
-        else:
-            logger.error("Freepik image generation timed out or returned an invalid response")
-    except Exception as e:
-        logger.error(f"Freepik failed: {str(e)}")
-
-    # Freepik failed (auth error, quota, timeout, etc.) -- fall back to
-    # Cloudflare Workers AI's FLUX.1 [schnell] model, which has a genuine
-    # free tier (10,000 Neurons/day, no credit card) and no per-key
-    # credential fragility of its own. Only kicks in if the Cloudflare env
-    # vars are actually configured; otherwise the caller's own instructions
-    # (image_selection_agent) fall back to get_stock_image_tool instead.
+    # Freepik was removed as a provider here (persistent 401 -- an invalid/
+    # expired key that was never rotated -- and a one-time trial credit
+    # rather than an ongoing free tier to begin with). Cloudflare Workers AI
+    # is the sole AI generator now; if it's not configured or fails, the
+    # caller falls back to get_stock_image_tool (Pexels).
     cloudflare_result = _generate_image_cloudflare(prompt, keyword)
     if cloudflare_result:
         return cloudflare_result
@@ -575,19 +512,17 @@ def post_to_sanity_tool(
         )
 
         # --- Image Handling ---
-        # Check if image_path is a URL from Freepik (no need to download)
+        # Check if image_path is a URL Sanity can fetch directly (no need to download)
         if image_path and image_path.startswith('http'):
-            # Check if it's a Freepik URL - these can be used directly with Sanity
-            freepik_url = 'freepik' in image_path.lower()
             pexel_url = 'pexels' in image_path.lower()
-            
-            if freepik_url or pexel_url:
-                # For Freepik or Pexel URLs, we can pass the URL directly to Sanity
-                logger.info(f"Detected {('Freepik' if freepik_url else 'Pexel')} URL, passing directly to Sanity: {image_path}")
+
+            if pexel_url:
+                # Pexels URLs can be passed directly to Sanity
+                logger.info(f"Detected Pexel URL, passing directly to Sanity: {image_path}")
                 local_image_path = image_path
                 temp_file = None
             else:
-                # For other URLs (like HuggingFace temporary files), download to temporary file
+                # For other URLs, download to a temporary file
                 normalized_image_path = image_path.replace('\\\\', '/').strip()
                 clean_image_url = normalized_image_path.split('?', 1)[0]
                 temp_file = None
@@ -681,12 +616,7 @@ def post_to_sanity_tool(
         if result["status"] == "success":
             # Determine source based on image_path
             if image_path and image_path.startswith('http'):
-                if 'freepik' in image_path.lower():
-                    image_source = "Freepik"
-                elif 'pexels' in image_path.lower():
-                    image_source = "Pexel"
-                else:
-                    image_source = "Downloaded"
+                image_source = "Pexel" if 'pexels' in image_path.lower() else "Downloaded"
             else:
                 image_source = "Local"
                 
@@ -704,12 +634,7 @@ def post_to_sanity_tool(
             image_source = "None"
             if image_path:
                 if image_path.startswith('http'):
-                    if 'freepik' in image_path.lower():
-                        image_source = "Freepik"
-                    elif 'pexels' in image_path.lower():
-                        image_source = "Pexel"
-                    else:
-                        image_source = "Download Failed"
+                    image_source = "Pexel" if 'pexels' in image_path.lower() else "Download Failed"
                 else:
                     image_source = "Local Error"
                     

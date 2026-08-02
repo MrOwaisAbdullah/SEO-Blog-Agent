@@ -1001,3 +1001,111 @@ use whatever it returns rather than aborting the publish. A generic real
 photo beats a failed post -- getting content published is the priority.
 Verified the import resolves cleanly and `preparation_agent.tools` now
 includes both `get_stock_image_tool` and `get_blog_image_tool`.
+
+## Found and fixed: two hooks classes with the same name, one silently mute
+
+User question ("why is Cloudflare image generation failing?") led to
+discovering there was no way to answer it from the logs at all --
+`Preparation Agent`/`Contextual Image Insertion Agent`/`Posting Agent`
+produced **zero** `[Hook]` lines in a real run's log, not even agent
+start/end, let alone individual tool calls (Freepik/Cloudflare/Pexels).
+
+Root cause: two different classes are both named `MyAgentHooks`.
+`blog_agent/hooks.py` defines the real one -- `print()`-based, logs agent
+start/end AND `on_tool_start`/`on_tool_end` with the tool name and full
+result -- and it's what Brief/Content/Research agents use (imported), which
+is why *their* logs have always shown full tool-call detail. But
+`blog_agent/posting_agent.py` defined its **own**, separate, much weaker
+class with the identical name: only `on_agent_start`/`on_agent_end`, no
+tool-level hooks at all, and using `logger.info()` instead of `print()`
+(which, combined with this pipeline's logging setup, wasn't reliably
+appearing in the captured Actions log either -- even the agent start/end
+lines never showed up). On top of that, `blog_agent/image_agent.py`'s three
+agents (`image_selection_agent`, `contextual_image_insertion_agent`,
+`image_quality_evaluation_agent` -- the ones that actually call
+Freepik/Cloudflare/Pexels) had **no hooks configured at all**, so even a
+correct hooks class on Preparation Agent wouldn't have shown what happens
+*inside* `get_blog_image_tool`.
+
+Fixed by removing `posting_agent.py`'s local duplicate class and importing
+the shared one from `blog_agent/hooks.py` instead (now used consistently
+everywhere), and adding `hooks=MyAgentHooks()` to all three agents in
+`image_agent.py`. This was a real, separate gap from the earlier
+`PYTHONUNBUFFERED`/`python -u` fix -- that fixed *ordering* of output that
+existed; this fixes the fact that most of the relevant output was never
+being produced in the first place. Verified live: all five agents
+(`preparation_agent`, `posting_agent`, `image_selection_agent`,
+`contextual_image_insertion_agent`, `image_quality_evaluation_agent`) now
+report `isinstance(agent.hooks, MyAgentHooks)` as `True` against the real
+shared class.
+
+## Removed Freepik as an image provider
+
+Per explicit request, and consistent with its persistent 401 (an
+expired/invalid key that was never rotated) plus the fact that it was only
+ever a one-time trial credit rather than an ongoing free tier to begin
+with (unlike Cloudflare Workers AI and Pexels, both genuinely free
+indefinitely): removed entirely rather than leaving a permanently-broken
+tier in the fallback chain.
+
+- `tools/tools.py`: `generate_image_tool` no longer tries Freepik at all --
+  Cloudflare Workers AI (FLUX.2 [dev]) is now the sole AI generator, with
+  Pexels as the stock-photo fallback if it's unavailable or fails.
+- `tools/tools.py` (`post_to_sanity_tool`) and `lib/sanity_adapter.py`
+  (`post_blog`): removed the Freepik-specific URL-detection branches (image
+  source could never be "Freepik" again anyway) -- Pexels URLs still pass
+  straight through to Sanity, everything else still downloads and uploads
+  as before.
+- Removed `FREEPIC_API_KEY` from `.env.example`, `README.md`,
+  `docs/service_setup.md`, and `.github/workflows/pipeline.yml`'s secrets.
+  Marked `docs/freepik_ai_image_guide.md` (a raw copy of Freepik's own API
+  reference) as obsolete rather than deleting it.
+- Verified `posting_agent.py` imports cleanly with no `FREEPIC_API_KEY` set
+  at all, and `preparation_agent.tools` still resolves correctly.
+
+## Per-model Gemini quota tracking (not shared across the account)
+
+User provided a screenshot of Google AI Studio's own rate-limits
+dashboard, which settled something this pipeline had been guessing at all
+session: Gemini's free-tier quota is genuinely **per model**, and nowhere
+close to uniform. "Gemini 3.6 Flash" (what `gemini-flash-latest` currently
+resolves to) is capped at 5 RPM / 20 RPD -- matching every 429 seen live
+this session (`quotaValue: '20'`). "Gemini 3.5 Flash Lite" (what
+`gemini-flash-lite-latest` currently resolves to) is capped at 15 RPM /
+**500 RPD** -- 25x more daily requests, sitting almost entirely unused.
+
+`custom_runner.py` previously tracked quota, performance stats, and
+temporary-unavailability at the **provider** level (`"gemini"`), shared
+across both Gemini model entries in `LLM_MODELS`. That meant the instant
+`gemini-flash-latest`'s tight 20/day cap was hit, `gemini-flash-lite-latest`
+got treated as exhausted too -- even though it still had roughly 480
+requests of its own, completely separate quota sitting untouched. This is
+likely a meaningful chunk of why Gemini has appeared to run out so
+quickly and so often throughout this session's live testing.
+
+Refactored `model_usage`, `model_limits`, `provider_stats`, and
+`provider_unavailable_until` to all key by **model name**
+(`"gemini-flash-latest"`, `"gemini-flash-lite-latest"`, `"openrouter-free"`,
+`"deepseek-v4-flash"`) instead of provider string, with
+`gemini-flash-lite-latest`'s limit set to `500` (from the dashboard) instead
+of sharing Flash's `20`. `is_model_available`, `increment_usage`,
+`_update_provider_stats`, `_sort_models_by_performance`, and the
+rate-limit/permanent-error marking in `run_with_fallback` were all updated
+to pass `model_config["name"]` instead of `model_config["provider"]`. A 429
+on `gemini-flash-latest` now only marks *that* model temporarily
+unavailable -- `gemini-flash-lite-latest` keeps its own independent budget
+and gets tried normally. Verified live: `model_usage`/`model_limits` now
+show four independent per-model buckets instead of three shared
+provider-level ones.
+
+## Added: discover_topics on its own ~2-day schedule
+
+Per explicit request: `discover_topics` previously only ran reactively
+(when `research` found an empty keyword queue) or on manual trigger, with
+no schedule of its own. Since one run proposes 4-5 candidates (each
+needing an individual Discord ✅/❌ approval before it's ever queued) and
+`research` only consumes one keyword/day, running discovery daily would
+just pile up unreviewed candidates faster than they could reasonably be
+approved. Added `cron: '0 1 */2 * *'` (~every 2 days, 6:00 AM PKT, an hour
+before `research`) to `.github/workflows/pipeline.yml`, with the matching
+case-statement entry mapping that schedule to `stage=discover_topics`.

@@ -28,9 +28,8 @@ Hugging Face Spaces secrets.
 | `OPENROUTER_API_KEY` | OpenRouter (LLM fallback, via `openrouter/free` auto-router, and the paid DeepSeek last-resort tier) | Required |
 | `TAVILY_API_KEY` | Tavily (research search/extract/crawl) | Required |
 | `SERPAPI_KEY` | SerpAPI (search fallback) | Required |
-| `PEXELS_API_KEY` | Pexels (image fallback) | Required |
-| `FREEPIC_API_KEY` | Freepik (primary AI image generation) | Required |
-| `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | Cloudflare Workers AI (free AI image generation fallback if Freepik fails) | Optional — falls through to Pexels stock photos if unset |
+| `PEXELS_API_KEY` | Pexels (stock photo fallback) | Required |
+| `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | Cloudflare Workers AI (primary AI image generation — free, no credit card) | Recommended — falls through to Pexels stock photos if unset |
 | `SANITY_PROJECT_ID` | Sanity CMS | Required |
 | `SANITY_DATASET` | Sanity CMS (e.g. `production`) | Required |
 | `SANITY_API_TOKEN` | Sanity CMS (needs write access) | Required |
@@ -177,39 +176,35 @@ has no real daily cap (pay-per-token, not quota-limited).
 
 ## 5. Images
 
-Three-tier fallback in `generate_image_tool`/`get_stock_image_tool`:
+Two-tier fallback in `generate_image_tool`/`get_stock_image_tool`:
 
-1. **Freepik** (`FREEPIC_API_KEY` — note the key name has no "k", it's not a
-   typo in this doc) — primary AI image generation, from
-   [freepik.com/api](https://www.freepik.com/api). Note: new accounts get a
-   one-time 5 EUR trial credit, not an ongoing free tier — budget for this
-   once that's spent. **If Freepik ever 401s (Unauthorized), the key has
-   expired/is invalid** — regenerate it in the Freepik dashboard and update
-   the secret; this isn't something the code can fix. Generation continues
-   via the next tier while the key is broken.
-2. **Cloudflare Workers AI** (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`)
-   — free AI image generation fallback if Freepik fails. Genuinely free:
-   10,000 Neurons/day, no credit card required, resets daily at 00:00 UTC.
-   Uses `@cf/black-forest-labs/flux-2-dev` (FLUX.2 [dev]) specifically —
-   picked from Cloudflare's ~45-model catalog based on live LM
-   Arena/Artificial Analysis Text-to-Image leaderboard data, not marketing
-   copy. **Important:** Cloudflare's model catalog mixes two totally
-   different things under one list — models marked **"Cloudflare-hosted"**
-   run on Cloudflare's own GPUs and are covered by the free Neuron pool;
-   models marked **"Third-party"** (gpt-image-2, nano-banana, seedream,
-   recraft, flux-2-pro/max/flex, etc.) are proxied to an external provider
-   and the free tier does **not** apply to them at all, regardless of how
-   they're listed alongside the free ones. Only pick a different model here
-   if it's explicitly "Cloudflare-hosted".
+1. **Cloudflare Workers AI** (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`)
+   — primary AI image generation. Genuinely free: 10,000 Neurons/day, no
+   credit card required, resets daily at 00:00 UTC. Uses
+   `@cf/black-forest-labs/flux-2-dev` (FLUX.2 [dev]) specifically — picked
+   from Cloudflare's ~45-model catalog based on live LM Arena/Artificial
+   Analysis Text-to-Image leaderboard data, not marketing copy.
+   **Important:** Cloudflare's model catalog mixes two totally different
+   things under one list — models marked **"Cloudflare-hosted"** run on
+   Cloudflare's own GPUs and are covered by the free Neuron pool; models
+   marked **"Third-party"** (gpt-image-2, nano-banana, seedream, recraft,
+   flux-2-pro/max/flex, etc.) are proxied to an external provider and the
+   free tier does **not** apply to them at all, regardless of how they're
+   listed alongside the free ones. Only pick a different model here if it's
+   explicitly "Cloudflare-hosted".
    - Setup: Cloudflare dashboard → note your **Account ID** (right sidebar
      on most pages) → **My Profile → API Tokens → Create Token** → use the
      "Workers AI" template (needs `Account.Workers AI:Edit`).
-3. **Pexels** (`PEXELS_API_KEY`) — stock photo fallback if both AI
-   generation options fail, from
+2. **Pexels** (`PEXELS_API_KEY`) — stock photo fallback if AI generation
+   fails or isn't configured, from
    [pexels.com/api](https://www.pexels.com/api/). Genuinely free and
    generous (200 req/hr, 20K/month).
 
-Hugging Face was removed as a fallback here (previously `HF_TOKEN` +
+Freepik was removed as a provider here (previously primary, before
+Cloudflare Workers AI was added) — its key started 401ing (expired/invalid,
+never rotated), and it was only ever a one-time trial credit, not an
+ongoing free tier, unlike everything else in this fallback chain. Hugging
+Face was removed earlier still (previously `HF_TOKEN` +
 `black-forest-labs/FLUX.1-dev`) — its free Inference API tier was cut down to
 a small monthly credit allowance in 2026 and had become unreliable.
 
@@ -246,9 +241,10 @@ bot in `discord_bot/`, deployed to the existing Hetzner VPS via Dokploy.
 Repo → Settings → Secrets and variables → Actions → New repository secret.
 Add every "Required" row from the [Quick reference](#quick-reference) table
 above (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
-`TAVILY_API_KEY`, `SERPAPI_KEY`, `PEXELS_API_KEY`, `FREEPIC_API_KEY`,
+`TAVILY_API_KEY`, `SERPAPI_KEY`, `PEXELS_API_KEY`,
 `SANITY_*`, `GOOGLE_CREDENTIALS`), plus `CLOUDFLARE_ACCOUNT_ID` +
-`CLOUDFLARE_API_TOKEN` (optional but recommended, image-gen fallback) and
+`CLOUDFLARE_API_TOKEN` (recommended — primary AI image generator; without
+it, every post falls straight through to Pexels stock photos) and
 `DISCORD_WEBHOOK_URL` (from step 3 below).
 
 ### 2. Create the Discord application + bot

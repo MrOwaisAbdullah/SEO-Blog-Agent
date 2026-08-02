@@ -539,19 +539,18 @@ class SanityAdapter:
             self.ensure_document_exists("author", author_id, {"name": author_name})
 
             # 2. Upload Image - check if it's a URL or local path
-            # Determine if image_path is a URL from Freepik/Pexel (no need to download) or local file
+            # Determine if image_path is a URL Sanity can fetch directly, or a local file
             image_asset_id = None
             image_url = None
-            
+
             if local_image_path and local_image_path.startswith('http'):
-                # It's a URL - check if it's from Freepik or Pexel to use directly
-                freepik_url = 'freepik' in local_image_path.lower()
+                # It's a URL - check if it's from Pexel to use directly
                 pexel_url = 'pexels' in local_image_path.lower()
-                
-                if freepik_url or pexel_url:
-                    # For Freepik or Pexel URLs, we'll let the main document creation process handle the URL
+
+                if pexel_url:
+                    # For Pexel URLs, we'll let the main document creation process handle the URL
                     # since Sanity can handle direct external image URLs in the content
-                    logger.info(f"Detected {('Freepik' if freepik_url else 'Pexel')} URL, will handle in main document: {local_image_path}")
+                    logger.info(f"Detected Pexel URL, will handle in main document: {local_image_path}")
                     # To use direct URLs, we'll need to pass the URL directly as the image_asset_id
                     # But since Sanity's image asset references need a proper asset ID, we still need to upload
                     # However, we can try to handle this by using Sanity's asset upload directly from URL

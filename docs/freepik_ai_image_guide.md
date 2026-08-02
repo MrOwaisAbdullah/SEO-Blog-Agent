@@ -1,3 +1,9 @@
+> **Obsolete.** Freepik was removed as an image provider (persistent 401 from
+> an expired key, and only ever a one-time trial credit rather than an
+> ongoing free tier). Cloudflare Workers AI is the current primary image
+> generator — see `docs/service_setup.md` section 5. Kept below for
+> historical reference only.
+
 Flux dev
 Create image from text - Flux dev
 Convert descriptive text input into images using AI. This endpoint accepts a variety of parameters to customize the generated images.
