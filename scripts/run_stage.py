@@ -459,6 +459,58 @@ def _select_review_candidate(
     return None
 
 
+def _select_review_candidate_from_sanity(
+    sanity_index: Dict[str, dict], sheet_rows_by_title: Dict[str, dict], check_column: str, min_age_days: Optional[int] = None,
+) -> Optional[str]:
+    """Like _select_review_candidate, but candidates come from the live
+    Sanity post list (sanity_index) instead of generated_posts sheet rows.
+    Confirmed live: some published posts have no generated_posts row at all
+    -- ones published before this pipeline's sheet-tracking existed, or
+    added directly in Sanity Studio -- and a sheet-row-driven selection
+    can never see them no matter how the age source is fixed, since the
+    outer loop itself never reaches them. Only use this for review stages
+    that don't need the sheet's own content (title/slug/age is enough --
+    e.g. search_performance_review); freshness_sweep still needs the
+    sheet's saved Markdown to fact-check and can't do this.
+
+    Rotation tracking (check_column) is read from the matching sheet row
+    when one exists; posts with no matching row are treated as
+    never-checked and sorted oldest-first as a reasonable fallback since
+    there's no stamp history to compare -- stamping later also silently
+    no-ops for these (find_row_by_key just won't find a row), which is
+    fine, they simply keep surfacing until something creates a row for
+    them some other way."""
+    now = datetime.now(timezone.utc)
+    never_checked = []
+    previously_checked = []
+    for title, info in sanity_index.items():
+        if not title:
+            continue
+        created_at = info.get("created_at")
+        if min_age_days is not None and created_at is not None and (now - created_at).days < min_age_days:
+            continue
+
+        sheet_row = sheet_rows_by_title.get(title) or {}
+        check_raw = str(sheet_row.get(check_column, "")).strip()
+        sort_key = created_at or datetime.min.replace(tzinfo=timezone.utc)
+        if not check_raw:
+            never_checked.append((sort_key, title))
+            continue
+        try:
+            checked_at = datetime.strptime(check_raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            checked_at = datetime.min.replace(tzinfo=timezone.utc)
+        previously_checked.append((checked_at, title))
+
+    if never_checked:
+        never_checked.sort(key=lambda pair: pair[0])
+        return never_checked[0][1]
+    if previously_checked:
+        previously_checked.sort(key=lambda pair: pair[0])
+        return previously_checked[0][1]
+    return None
+
+
 def _ensure_brief_persisted(brief: dict) -> None:
     """The Brief Agent is instructed to save its own output via
     manage_sheet_data_tool, but a fallback model can generate a fully
@@ -1281,24 +1333,25 @@ SEARCH_PERFORMANCE_MIN_AGE_DAYS = 35  # needs a full 28-day GSC window post-publ
 async def run_search_performance_review() -> None:
     """Checks the published post most overdue for a performance review
     (never checked before, or checked longest ago -- see
-    _select_review_candidate) against real Google Search Console data and
-    flags it if the data suggests a specific, fixable problem: meaningful
-    impressions but low CTR (a title/meta description that isn't earning
-    clicks) or meaningful impressions but a poor average position (a
-    content depth/authority gap, not a snippet problem). Same
+    _select_review_candidate_from_sanity) against real Google Search
+    Console data and flags it if the data suggests a specific, fixable
+    problem: meaningful impressions but low CTR (a title/meta description
+    that isn't earning clicks) or meaningful impressions but a poor average
+    position (a content depth/authority gap, not a snippet problem). Same
     detect-and-suggest pattern as run_freshness_sweep -- never auto-applies,
     posts a suggested /edit for the reviewer to apply if they agree.
 
-    Age comes from Sanity's real _createdAt (via _get_sanity_post_index),
-    not a sheet timestamp -- includes posts published long before this
-    pipeline tracked anything itself. Rotates through the whole catalog
-    over multiple runs via a "Last Performance Check" column instead of
-    re-picking the same post every time."""
+    Candidates come directly from Sanity's live post list, not the
+    generated_posts sheet -- confirmed live, some published posts (ones
+    from before this pipeline's sheet-tracking existed, or added directly
+    in Sanity Studio) have no sheet row at all, and a sheet-row-driven
+    selection could never see them regardless of how age was sourced. Only
+    title/slug/age is needed here (no body content, unlike freshness_sweep),
+    all of which Sanity's own _createdAt provides. Rotates through the whole
+    catalog over multiple runs via a "Last Performance Check" sheet column
+    (best-effort -- posts without a matching sheet row just can't persist a
+    stamp, see _select_review_candidate_from_sanity)."""
     from lib.search_console import find_striking_distance_queries, get_page_country_device_breakdown, get_page_performance
-
-    records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
-    if records.get("status") != "success":
-        raise RuntimeError(f"Failed to read generated_posts: {records}")
 
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
 
@@ -1311,23 +1364,37 @@ async def run_search_performance_review() -> None:
             print(f"Failed to send Discord search-performance notification: {e}")
 
     sanity_index = _get_sanity_post_index()
-    candidate = _select_review_candidate(
-        records.get("data", []), sanity_index, "Last Performance Check", min_age_days=SEARCH_PERFORMANCE_MIN_AGE_DAYS,
+    if not sanity_index:
+        msg = "Couldn't load the live post list from Sanity this run; nothing to check."
+        print(f"[search_performance_review] {msg}")
+        _notify(f"📊 Search performance review: {msg}")
+        return
+
+    sheet_rows_by_title: Dict[str, dict] = {}
+    records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    if records.get("status") == "success":
+        for row in records.get("data", []):
+            t = str(row.get("Title", "")).strip()
+            if t:
+                sheet_rows_by_title[t] = row
+
+    title = _select_review_candidate_from_sanity(
+        sanity_index, sheet_rows_by_title, "Last Performance Check", min_age_days=SEARCH_PERFORMANCE_MIN_AGE_DAYS,
     )
-    if candidate is None:
+    if title is None:
         msg = f"No published posts eligible right now (needs to be {SEARCH_PERFORMANCE_MIN_AGE_DAYS}+ days old)."
         print(f"[search_performance_review] {msg}")
         _notify(f"📊 Search performance review: {msg}")
         return
 
-    title = str(candidate.get("Title", "")).strip()
     # Stamp before the actual check, not after -- so a genuine crash mid-run
-    # doesn't leave this exact post stuck being re-selected forever.
+    # doesn't leave this exact post stuck being re-selected forever. A
+    # no-op if there's no matching sheet row to stamp (see docstring above).
     _stamp_check_column("generated_posts", "Title", title, "Last Performance Check")
 
-    slug = (sanity_index.get(title) or {}).get("slug")
+    slug = sanity_index[title].get("slug")
     if not slug:
-        msg = f"Picked '{title}' but couldn't find its live Sanity document; skipped."
+        msg = f"Picked '{title}' but its live Sanity document has no slug; skipped."
         print(f"[search_performance_review] {msg}")
         _notify(f"📊 Search performance review: {msg}")
         return
