@@ -1,0 +1,28 @@
+name: Test Search Console Access
+
+# One-off diagnostic, manual-dispatch only -- no schedule. Verifies the
+# GOOGLE_CREDENTIALS service account actually has working Search Console
+# access before the real integration gets built. Safe to leave in the repo
+# permanently as a reusable debug tool (zero cost unless manually triggered),
+# or delete once Search Console access is confirmed working and the real
+# integration exists.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Run Search Console access test
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          PYTHONUNBUFFERED: "1"
+        run: uv run python -u scripts/test_search_console.py
