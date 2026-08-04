@@ -16,7 +16,7 @@ Run with GOOGLE_CREDENTIALS set in the environment:
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -80,7 +80,7 @@ def main() -> None:
         sys.exit(1)
 
     print(f"\nStep 2: Pulling a real Search Analytics query for {SITE_URL} (last 7 days)...")
-    end_date = datetime.utcnow().date() - timedelta(days=3)  # GSC data has a ~2-3 day lag
+    end_date = datetime.now(timezone.utc).date() - timedelta(days=3)  # GSC data has a ~2-3 day lag
     start_date = end_date - timedelta(days=7)
     query_body = {
         "startDate": start_date.isoformat(),
