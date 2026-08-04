@@ -916,6 +916,41 @@ def edit_post_content_tool(edit_instruction: str, title_reference: Optional[str]
     return _request_post_edit(edit_instruction, title_reference)
 
 
+def _request_repurpose(title: str) -> dict:
+    """Shared by repurpose_content_tool (chat) and the /repurpose slash
+    command. Unlike edit, there's no sensible default-to-latest here --
+    per explicit request, the user decides which posts get repurposed, the
+    pipeline never auto-picks and drafts for them unprompted (see
+    run_repurpose's "recommend-only" mode, which is what runs on the
+    schedule with no title given). title is required for this path."""
+    title = (title or "").strip()
+    if not title:
+        return {"status": "error", "error": "A post title is required -- ask for the recommendation list first if you don't know which one to name."}
+    try:
+        already_running = dispatch_workflow("repurpose", extra_inputs={"repurpose_title": title})
+    except Exception as e:
+        logger.exception("_request_repurpose: failed to dispatch repurpose")
+        return {"status": "error", "error": str(e)}
+    return {"status": "triggered", "title": title, "queued_behind_another_run": already_running}
+
+
+@function_tool
+def repurpose_content_tool(title: str) -> dict:
+    """Drafts LinkedIn + Reddit-style repurposed copy (plus an AI image
+    prompt) for ONE specific already-published post, named by title
+    (case-insensitive partial match). Only call this when the user has
+    actually picked a post -- e.g. after seeing the recommendation list
+    (get_pipeline_status_tool doesn't include it; the recommendations come
+    from the scheduled repurpose stage posting to Discord) or when they
+    directly name a post they want repurposed. Never guess or auto-pick a
+    post yourself -- if the user hasn't named one, ask which post they mean
+    rather than calling this. Does NOT post to LinkedIn/Reddit itself, only
+    drafts copy for the user to copy/paste manually. The result includes
+    queued_behind_another_run: if true, tell the user it'll start once the
+    current run finishes."""
+    return _request_repurpose(title)
+
+
 class _ChatAgentHooks(AgentHooks):
     """Without this, the ContentSpark Assistant's tool calls (deciding to
     check status, prioritize a topic, trigger a stage, request an edit) are
@@ -984,11 +1019,19 @@ def _build_discord_agent() -> Optional[Agent]:
             "it guessed wrong. It preserves the post's structure, links, FAQs, and "
             "SEO fields and only changes what was asked; if the post is already "
             "live it updates the published version too.\n"
+            "- When the user asks what's worth repurposing for social media, or which "
+            "posts they should share, call trigger_stage_tool with stage="
+            "\"repurpose\" and tell them the recommendations will come through as a "
+            "Discord message shortly (this stage only ever recommends, it never "
+            "drafts copy for a post you haven't picked). Once the user names a "
+            "SPECIFIC post they want repurposed (from that list or otherwise), call "
+            "repurpose_content_tool with that title -- never call it without the "
+            "user having named a post first, and never pick one for them.\n"
             "- Any tool that can return queued_behind_another_run=true "
-            "(trigger_stage_tool, edit_post_content_tool) means a pipeline run was "
-            "already active when you triggered this one -- say clearly that it's "
-            "queued and will start once the current run finishes, don't imply it's "
-            "running right now.\n"
+            "(trigger_stage_tool, edit_post_content_tool, repurpose_content_tool) "
+            "means a pipeline run was already active when you triggered this one -- "
+            "say clearly that it's queued and will start once the current run "
+            "finishes, don't imply it's running right now.\n"
             "- Do this yourself -- don't just tell the user to run a slash command "
             "or react to a message when you can call these tools directly instead."
         ),
@@ -1000,6 +1043,7 @@ def _build_discord_agent() -> Optional[Agent]:
             mark_post_published_tool,
             set_post_approval_tool,
             edit_post_content_tool,
+            repurpose_content_tool,
         ],
         hooks=_ChatAgentHooks(),
         model=model,
@@ -1354,6 +1398,23 @@ async def edit_command(interaction: discord.Interaction, instruction: str, title
         return
     logger.info(f"[/edit] Dispatched edit_post for {result['title']!r} (queued_behind_another_run={result.get('queued_behind_another_run')})")
     reply = f"✏️ Requested edit to **{result['title']}**: {instruction}"
+    if result.get("queued_behind_another_run"):
+        reply += "\n(Another run is already in progress -- this will start once it finishes.)"
+    await interaction.followup.send(reply)
+
+
+@bot.tree.command(name="repurpose", description="Draft LinkedIn + Reddit copy for a specific published post")
+@app_commands.describe(title="Post title, or partial title -- required, see the recommendation list first if unsure")
+async def repurpose_command(interaction: discord.Interaction, title: str):
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[/repurpose] Requested by {interaction.user}: title={title!r}")
+    result = _request_repurpose(title)
+    if result.get("status") == "error":
+        logger.warning(f"[/repurpose] Failed: {result.get('error')}")
+        await interaction.followup.send(f"⚠️ {result.get('error')}")
+        return
+    logger.info(f"[/repurpose] Dispatched repurpose for {result['title']!r} (queued_behind_another_run={result.get('queued_behind_another_run')})")
+    reply = f"📢 Drafting repurposed copy for **{result['title']}** -- check this channel shortly."
     if result.get("queued_behind_another_run"):
         reply += "\n(Another run is already in progress -- this will start once it finishes.)"
     await interaction.followup.send(reply)

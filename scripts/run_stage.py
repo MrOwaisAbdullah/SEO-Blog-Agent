@@ -20,7 +20,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
@@ -38,7 +38,7 @@ import requests
 from agents import set_tracing_disabled
 from agents.run import set_default_agent_runner
 
-from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent, freshness_check_agent, repurposing_agent
+from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent, freshness_check_agent, repurposing_agent, repurpose_angle_agent
 from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
@@ -995,66 +995,42 @@ async def run_freshness_sweep() -> None:
             print(f"Failed to send Discord freshness notification: {e}")
 
 
-_REPURPOSED_CONTENT_HEADERS = ["Keyword/Topic", "Title", "Post URL", "LinkedIn Post", "Reddit Summary", "Created At"]
+_REPURPOSED_CONTENT_HEADERS = ["Keyword/Topic", "Title", "Post URL", "LinkedIn Post", "Reddit Summary", "Image Prompt", "Created At"]
 
 
-async def run_repurpose() -> None:
-    """Drafts LinkedIn/Reddit-style repurposed copy for the most recently
-    published post that hasn't been repurposed yet, and posts it to Discord
-    for the user to copy/use manually. This is the reduced v1 scope of the
-    "Publisher and Repurposer Agent" originally planned in
-    docs/overview.md/README.md but never built -- drafting only, no direct
-    platform API posting (LinkedIn/Reddit API access is a meaningfully
-    bigger scope increase, deliberately deferred). Writes to a new
-    repurposed_content worksheet (self-created if it doesn't exist yet --
-    see ensure_worksheet_exists), matching that original design's stated
-    output."""
-    if not ensure_worksheet_exists("repurposed_content", _REPURPOSED_CONTENT_HEADERS):
-        raise RuntimeError("Failed to ensure repurposed_content worksheet exists.")
-
+def _get_successful_published_posts() -> list:
     published = manage_sheet_data(worksheet_name="published_posts", action="get_all_records")
     if published.get("status") != "success":
         raise RuntimeError(f"Failed to read published_posts: {published}")
-    successful = [r for r in published.get("data", []) if not str(r.get("Error", "")).strip()]
-    if not successful:
-        print("[repurpose] No successfully published posts found.")
-        return
+    return [r for r in published.get("data", []) if not str(r.get("Error", "")).strip()]
 
+
+def _get_repurposed_topics() -> set:
     repurposed = manage_sheet_data(worksheet_name="repurposed_content", action="get_all_records")
-    already_done = set()
-    if repurposed.get("status") == "success":
-        already_done = {str(r.get("Keyword/Topic", "")).strip() for r in repurposed.get("data", [])}
+    if repurposed.get("status") != "success":
+        return set()
+    return {str(r.get("Keyword/Topic", "")).strip() for r in repurposed.get("data", [])}
 
-    # published_posts rows are appended in publish order -- walk backwards
-    # so freshly-published content gets repurposed while it's still timely,
-    # not oldest backlog first.
-    candidate = None
-    for row in reversed(successful):
-        topic = str(row.get("Keyword/Topic", "")).strip()
-        if topic and topic not in already_done:
-            candidate = row
-            break
 
-    if candidate is None:
-        print("[repurpose] Every successfully published post has already been repurposed.")
-        return
-
-    topic = str(candidate.get("Keyword/Topic", "")).strip()
-    post_url = str(candidate.get("Post URL", "")).strip()
-
+async def _draft_repurposed_content(topic: str, title: str, post_url: str) -> None:
+    """Drafts LinkedIn + Reddit-style copy for one specific post (identified
+    by the user, not auto-picked -- see run_repurpose) and posts it to
+    Discord for the user to copy/use manually. This is the reduced v1 scope
+    of the "Publisher and Repurposer Agent" originally planned in
+    docs/overview.md/README.md but never built -- drafting only, no direct
+    platform API posting (LinkedIn/Reddit API access is a meaningfully
+    bigger scope increase, deliberately deferred). Writes to the
+    repurposed_content worksheet."""
     posts = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
     content = ""
-    title = topic
     if posts.get("status") == "success":
         for row in posts.get("data", []):
             if str(row.get("Title", "")).strip() == topic:
                 content = str(row.get("Generated Content", ""))
-                title = str(row.get("Title", "")).strip() or topic
                 break
 
     if not content:
-        print(f"[repurpose] Could not find Generated Content for '{topic}' in generated_posts; skipping this run.")
-        return
+        raise RuntimeError(f"Could not find Generated Content for '{topic}' in generated_posts.")
 
     print(f"[repurpose] Drafting repurposed copy for '{title}'.")
     result = await custom_runner.run_with_fallback(
@@ -1069,15 +1045,19 @@ async def run_repurpose() -> None:
 
     linkedin_post = str(_get_field(parsed, "linkedin_post", "")).strip()
     reddit_summary = str(_get_field(parsed, "reddit_summary", "")).strip()
+    image_prompt = str(_get_field(parsed, "image_prompt", "")).strip()
     if not linkedin_post or not reddit_summary:
         raise RuntimeError(f"Repurposing Agent output missing linkedin_post/reddit_summary: {output[:300]}")
 
-    append_result = manage_sheet_data(
-        worksheet_name="repurposed_content", action="append_row",
-        row_values=[topic, title, post_url, linkedin_post, reddit_summary, _timestamp_now()],
-    )
-    if append_result.get("status") != "success":
-        print(f"[repurpose] Warning: failed to save to repurposed_content: {append_result}")
+    if not ensure_worksheet_exists("repurposed_content", _REPURPOSED_CONTENT_HEADERS):
+        print("[repurpose] Warning: failed to ensure repurposed_content worksheet exists; skipping save.")
+    else:
+        append_result = manage_sheet_data(
+            worksheet_name="repurposed_content", action="append_row",
+            row_values=[topic, title, post_url, linkedin_post, reddit_summary, image_prompt, _timestamp_now()],
+        )
+        if append_result.get("status") != "success":
+            print(f"[repurpose] Warning: failed to save to repurposed_content: {append_result}")
 
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     if webhook_url:
@@ -1088,9 +1068,101 @@ async def run_repurpose() -> None:
                 for i, chunk in enumerate(chunks, start=1):
                     prefix = f"**{label} ({i}/{len(chunks)})**\n\n" if len(chunks) > 1 else f"**{label}**\n\n"
                     _post_discord_message(webhook_url, prefix + chunk)
+            if image_prompt:
+                _post_discord_message(webhook_url, f"**🎨 Image prompt**\n\n{image_prompt}")
         except Exception as e:
             print(f"Failed to send Discord repurpose notification: {e}")
     print(f"[repurpose] Drafted and saved repurposed content for '{title}'.")
+
+
+async def run_repurpose() -> None:
+    """Two modes, matching how run_edit_post is parameterized:
+
+    - REPURPOSE_TITLE not set (the normal scheduled path): RECOMMENDS
+      candidates only -- lists every successfully published post that
+      hasn't been repurposed yet (title + URL) in one Discord message, and
+      does NOT draft anything. Per explicit request: the user decides which
+      posts get repurposed, this pipeline doesn't auto-pick and draft for
+      them unprompted.
+    - REPURPOSE_TITLE set (dispatched by repurpose_content_tool/`/repurpose`
+      with a title the user picked): drafts LinkedIn/Reddit copy for that
+      ONE specific post via _draft_repurposed_content, regardless of
+      whether it's already in repurposed_content -- an explicit request to
+      repurpose a specific post again is honored, not silently skipped."""
+    requested_title = os.environ.get("REPURPOSE_TITLE", "").strip()
+    successful = _get_successful_published_posts()
+    if not successful:
+        print("[repurpose] No successfully published posts found.")
+        return
+
+    if requested_title:
+        needle = requested_title.lower()
+        match = next(
+            (row for row in successful if needle in str(row.get("Keyword/Topic", "")).strip().lower()),
+            None,
+        )
+        if match is None:
+            raise RuntimeError(f"No published post matching '{requested_title}' found in published_posts.")
+        topic = str(match.get("Keyword/Topic", "")).strip()
+        post_url = str(match.get("Post URL", "")).strip()
+        await _draft_repurposed_content(topic, topic, post_url)
+        return
+
+    already_done = _get_repurposed_topics()
+    # Newest first (published_posts rows are appended in publish order) so
+    # the most timely candidates are recommended first.
+    candidates = [
+        row for row in reversed(successful)
+        if str(row.get("Keyword/Topic", "")).strip() and str(row.get("Keyword/Topic", "")).strip() not in already_done
+    ]
+    if not candidates:
+        print("[repurpose] Every successfully published post has already been repurposed.")
+        return
+
+    print(f"[repurpose] Recommending {len(candidates)} not-yet-repurposed post(s).")
+
+    # Summary lookup for the angle suggestions below -- one extra sheet read,
+    # reused for every candidate rather than one read per candidate.
+    summaries: Dict[str, str] = {}
+    posts = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    if posts.get("status") == "success":
+        for row in posts.get("data", []):
+            t = str(row.get("Title", "")).strip()
+            if t:
+                summaries[t] = str(row.get("Summary", "")).strip()
+
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if webhook_url:
+        lines = ["**📢 Posts ready to repurpose** (not yet done):"]
+        for row in candidates[:10]:
+            title = row.get("Keyword/Topic", "").strip()
+            entry = f"• **{title}**\n  {row.get('Post URL', '').strip()}"
+
+            # Best-effort: a cheap suggested angle per candidate, so the
+            # decision of *whether* to repurpose something doesn't require
+            # already reading the full drafted copy. A failure here just
+            # means no angle line for that one candidate, not a stage failure.
+            summary = summaries.get(title, "")
+            if summary:
+                try:
+                    angle_result = await custom_runner.run_with_fallback(
+                        repurpose_angle_agent,
+                        f"Title: {title}\nSummary: {summary}",
+                        max_turns=3,
+                    )
+                    angle = str(getattr(angle_result, "final_output", angle_result)).strip()
+                    if angle:
+                        entry += f"\n  💡 _{angle}_"
+                except Exception as e:
+                    print(f"[repurpose] Warning: failed to generate angle for '{title}': {e}")
+
+            lines.append(entry)
+        lines.append("\nAsk me (or `/repurpose`) with the title of the one you want -- I only draft the ones you pick.")
+        try:
+            for chunk in _chunk_for_discord("\n".join(lines)):
+                _post_discord_message(webhook_url, chunk)
+        except Exception as e:
+            print(f"Failed to send Discord repurpose recommendation: {e}")
 
 
 SEARCH_PERFORMANCE_MIN_IMPRESSIONS = 20

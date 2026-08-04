@@ -54,6 +54,10 @@ on:
         description: '(edit_post only) The specific change to make to that post'
         required: false
         type: string
+      repurpose_title:
+        description: '(repurpose only, optional) Title of a specific post to draft repurposed copy for. Leave empty to just get recommendations instead.'
+        required: false
+        type: string
 
 # Without this, a scheduled run and a Discord-triggered manual run (or two
 # manual triggers close together) can execute at the same time. Preparation
@@ -123,6 +127,9 @@ jobs:
           # (scheduled runs and workflow_dispatch runs for other stages).
           EDIT_TITLE: ${{ github.event.inputs.edit_title }}
           EDIT_INSTRUCTION: ${{ github.event.inputs.edit_instruction }}
+          # Only meaningful for stage=repurpose. Empty means "just recommend
+          # candidates, don't draft anything" -- see run_repurpose.
+          REPURPOSE_TITLE: ${{ github.event.inputs.repurpose_title }}
           # Python block-buffers stdout when it isn't a TTY (i.e. always, in
           # Actions) -- print()/logger output can sit in the buffer for
           # minutes and land in the log wildly out of real chronological
