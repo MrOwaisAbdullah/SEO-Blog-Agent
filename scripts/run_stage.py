@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Optional
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
@@ -37,7 +38,7 @@ import requests
 from agents import set_tracing_disabled
 from agents.run import set_default_agent_runner
 
-from blog_agent.blog_agents import brief_agent, content_generator_agent
+from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent
 from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
@@ -227,6 +228,21 @@ def _notify_discord_status(stage: str, success: bool, detail: str = "") -> None:
         print(f"Failed to send Discord status notification: {e}")
 
 
+def _notify_discord_stage_subject(verb: str, icon: str, subject: str) -> None:
+    """One-line notification naming what a stage actually worked on, instead
+    of the content-free generic "Stage X completed." ping -- so the Discord
+    history itself shows which topic got researched or which brief was
+    written without needing to open the sheet. Used by research/brief;
+    content/post already post their own richer notifications."""
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
+        return
+    try:
+        _post_discord_message(webhook_url, f"{icon} {verb} **{subject}**")
+    except Exception as e:
+        print(f"Failed to send Discord '{verb}' notification: {e}")
+
+
 def _notify_discord_topic_candidates(candidates: list) -> None:
     """Posts each trending-topic candidate as its OWN message so it can carry
     its own ✅/❌ reaction, same granular approval pattern as draft posts. The
@@ -272,6 +288,10 @@ async def run_research() -> None:
         # actually being discussed right now and propose it for approval.
         print("[research] No available keywords; running topic discovery instead.")
         await run_discover_topics()
+        return
+
+    if isinstance(result, dict) and result.get("status") == "success" and result.get("keyword"):
+        _notify_discord_stage_subject("Researched", "🔎", result["keyword"])
 
 
 async def run_discover_topics() -> None:
@@ -283,6 +303,59 @@ async def run_discover_topics() -> None:
         print("[discover_topics] No current topic candidates found.")
         return
     _notify_discord_topic_candidates(result["candidates"])
+
+
+def _ensure_column_header(worksheet_name: str, column_name: str) -> Optional[int]:
+    """Adds column_name as a new header cell (appended after the existing
+    header row, never inserted in the middle -- that would shift every
+    existing row's column mapping) if it doesn't already exist in
+    worksheet_name, and returns its 1-based column index either way.
+    Self-healing schema instead of requiring a manual one-time edit to the
+    live Google Sheet before this feature works."""
+    headers_result = manage_sheet_data(worksheet_name=worksheet_name, action="get_range", cell_range="1:1")
+    header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else []
+    if column_name in header_row:
+        return header_row.index(column_name) + 1
+    new_index = len(header_row) + 1
+    update_result = manage_sheet_data(
+        worksheet_name=worksheet_name, action="update_cell",
+        row_index=1, col_index=new_index, data=column_name,
+    )
+    if update_result.get("status") != "success":
+        print(f"Warning: failed to add '{column_name}' header to {worksheet_name}: {update_result}")
+        return None
+    print(f"Added '{column_name}' header column to {worksheet_name} at index {new_index}.")
+    return new_index
+
+
+_CREATED_AT_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
+
+
+def _timestamp_now() -> str:
+    return datetime.now(timezone.utc).strftime(_CREATED_AT_FORMAT)
+
+
+def _stamp_created_at(worksheet_name: str, key_column: str, key_value: str) -> None:
+    """Records when a row was created in a 'Created At' column (adding that
+    column to the sheet the first time it's needed). Requested so "which
+    post is latest" has an actual answer instead of an inferred one from row
+    position -- row order happens to be a reliable recency proxy today since
+    rows are only ever appended, but an explicit timestamp is unambiguous
+    and lets the bot/user ask "when was this written" directly. Best-effort
+    and idempotent (skips a row that's already stamped) -- a missing
+    timestamp is not worth failing an otherwise-successful stage over."""
+    try:
+        col_index = _ensure_column_header(worksheet_name, "Created At")
+        if col_index is None:
+            return
+        lookup = manage_sheet_data(worksheet_name=worksheet_name, action="find_row_by_key", key_column=key_column, key_value=key_value)
+        if not (lookup.get("status") == "success" and lookup.get("found")):
+            return
+        if str((lookup.get("data") or {}).get("Created At", "")).strip():
+            return
+        manage_sheet_data(worksheet_name=worksheet_name, action="update_cell", row_index=lookup["row_index"], col_index=col_index, data=_timestamp_now())
+    except Exception as e:
+        print(f"Warning: failed to stamp Created At on {worksheet_name} for '{key_value}': {e}")
 
 
 def _ensure_brief_persisted(brief: dict) -> None:
@@ -325,8 +398,18 @@ def _ensure_brief_persisted(brief: dict) -> None:
             raise RuntimeError(f"Failed to persist brief to content_briefs: {append_result}")
         print(f"[brief] Appended row to content_briefs for '{keyword}' (agent reported success but had not saved it).")
 
-    # Mark the source research_data row as consumed so the next brief run
-    # doesn't pick up the same row again.
+    _stamp_created_at("content_briefs", "Keyword/Topic", keyword)
+    _graduate_research_row(keyword)
+
+
+def _graduate_research_row(keyword: str) -> None:
+    """Kanban-style graduation: once a brief exists in content_briefs for
+    this keyword, the research_data row has done its job. Deletes it
+    outright (rather than just marking Generated=Yes, the previous
+    behavior) per explicit request -- research_data should only ever show
+    what's genuinely still waiting on a brief. This never touches
+    ContentSpark_Keywords (the reusable keyword queue) or generated_posts/
+    published_posts (actual output), only this intermediate working row."""
     lookup = manage_sheet_data(
         worksheet_name="research_data",
         action="find_row_by_key",
@@ -334,28 +417,17 @@ def _ensure_brief_persisted(brief: dict) -> None:
         key_value=keyword,
     )
     if not (lookup.get("status") == "success" and lookup.get("found")):
-        print(f"[brief] Warning: could not find research_data row for '{keyword}' to mark as Generated.")
+        print(f"[brief] Warning: could not find research_data row for '{keyword}' to remove.")
         return
-    if str((lookup.get("data") or {}).get("Generated", "")).strip().lower() == "yes":
-        print(f"[brief] research_data row for '{keyword}' already marked Generated=Yes.")
-        return
-
-    headers_result = manage_sheet_data(worksheet_name="research_data", action="get_range", cell_range="1:1")
-    header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else []
-    if "Generated" not in header_row:
-        print("[brief] Warning: 'Generated' column not found in research_data headers; cannot mark row consumed.")
-        return
-    update_result = manage_sheet_data(
+    delete_result = manage_sheet_data(
         worksheet_name="research_data",
-        action="update_cell",
+        action="delete_row",
         row_index=lookup["row_index"],
-        col_index=header_row.index("Generated") + 1,
-        data="Yes",
     )
-    if update_result.get("status") != "success":
-        print(f"[brief] Warning: failed to mark research_data row {lookup['row_index']} as Generated=Yes: {update_result}")
+    if delete_result.get("status") != "success":
+        print(f"[brief] Warning: failed to remove research_data row {lookup['row_index']} for '{keyword}': {delete_result}")
     else:
-        print(f"[brief] Marked research_data row {lookup['row_index']} as Generated=Yes for '{keyword}'.")
+        print(f"[brief] Removed research_data row {lookup['row_index']} for '{keyword}' (brief created).")
 
 
 def _tool_call_succeeded(run_result, expect_in_message: str) -> bool:
@@ -395,12 +467,23 @@ async def run_brief() -> None:
         if _get_field(parsed, "status") == "error":
             raise RuntimeError(f"Brief stage failed: {output}")
         _ensure_brief_persisted(parsed)
+        keyword = str(_get_field(parsed, "Keyword/Topic")).strip()
+        if keyword:
+            _notify_discord_stage_subject("Brief created for", "📝", keyword)
         return
 
     # Not JSON. Before treating this as a failure, check whether the
     # agent's own tool calls already saved everything correctly.
     if _tool_call_succeeded(result, "Row appended to content_briefs"):
         print("[brief] Final answer wasn't JSON, but content_briefs was already updated via a real tool call -- treating as success.")
+        records = manage_sheet_data(worksheet_name="content_briefs", action="get_all_records")
+        if records.get("status") == "success" and records.get("data"):
+            last_row = records["data"][-1]
+            keyword = str(_get_field(last_row, "Keyword/Topic")).strip()
+            if keyword:
+                _stamp_created_at("content_briefs", "Keyword/Topic", keyword)
+                _graduate_research_row(keyword)
+                _notify_discord_stage_subject("Brief created for", "📝", keyword)
         return
     if _looks_like_unexecuted_tool_call(output):
         raise RuntimeError(
@@ -579,6 +662,7 @@ def _ensure_content_persisted(content: dict) -> dict:
     if existing_row:
         if not _row_looks_malformed(existing_row):
             print(f"[content] generated_posts already has a row for '{title}'; agent saved it correctly.")
+            _stamp_created_at("generated_posts", "Title", title)
             return existing_row
 
         # The agent's own append_row call shipped the wrong shape (too few
@@ -601,6 +685,7 @@ def _ensure_content_persisted(content: dict) -> dict:
             if update_result.get("status") != "success":
                 print(f"[content] Warning: failed to repair '{field_name}' for '{title}': {update_result}")
         print(f"[content] Repaired generated_posts row {existing_row_index} for '{title}'.")
+        _stamp_created_at("generated_posts", "Title", title)
         return correct_values
 
     row_values = _content_row_values(content, title)
@@ -612,10 +697,40 @@ def _ensure_content_persisted(content: dict) -> dict:
     if append_result.get("status") != "success":
         raise RuntimeError(f"Failed to persist content to generated_posts: {append_result}")
     print(f"[content] Appended row to generated_posts for '{title}' (agent reported success but had not saved it).")
+    _stamp_created_at("generated_posts", "Title", title)
     return row_values
 
 
+def _graduate_content_brief(row_index: int, keyword: str) -> None:
+    """Kanban-style graduation, symmetric to _graduate_research_row: once
+    content exists in generated_posts, the content_briefs row that fed it
+    has done its job -- delete it outright. row_index is captured BEFORE
+    the agent runs (content_generator_agent's own JSON output doesn't
+    reliably echo back Keyword/Topic, only Title, which isn't guaranteed
+    identical) by pre-fetching the same row the agent's own
+    find_row_by_key(Generated="No") lookup will pick -- safe as long as
+    only one run touches content_briefs at a time, which the workflow's
+    concurrency group now guarantees."""
+    delete_result = manage_sheet_data(
+        worksheet_name="content_briefs", action="delete_row", row_index=row_index,
+    )
+    if delete_result.get("status") != "success":
+        print(f"[content] Warning: failed to remove content_briefs row {row_index} for '{keyword}': {delete_result}")
+    else:
+        print(f"[content] Removed content_briefs row {row_index} for '{keyword}' (content generated).")
+
+
 async def run_content() -> None:
+    source_brief = manage_sheet_data(
+        worksheet_name="content_briefs", action="find_row_by_key",
+        key_column="Generated", key_value="No",
+    )
+    source_row_index = None
+    source_keyword = ""
+    if source_brief.get("status") == "success" and source_brief.get("found"):
+        source_row_index = source_brief.get("row_index")
+        source_keyword = str(_get_field(source_brief.get("data") or {}, "Keyword/Topic")).strip()
+
     result = await custom_runner.run_with_fallback(
         content_generator_agent,
         "Generate content based on the first available brief that is not generated yet from the content_briefs worksheet and add it to the generated_posts worksheet.",
@@ -648,12 +763,15 @@ async def run_content() -> None:
                 records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
                 if records.get("status") == "success" and records.get("data"):
                     last_row = records["data"][-1]
+                    _stamp_created_at("generated_posts", "Title", str(last_row.get("Title", "")).strip())
                     _notify_discord(
                         title=last_row.get("Title", "Untitled"),
                         summary=last_row.get("Summary", ""),
                         content=last_row.get("Generated Content", ""),
                         faqs=last_row.get("FAQs", ""),
                     )
+                if source_row_index is not None:
+                    _graduate_content_brief(source_row_index, source_keyword)
                 return
             if _looks_like_unexecuted_tool_call(output):
                 raise RuntimeError(
@@ -664,6 +782,8 @@ async def run_content() -> None:
         print("[content] Agent returned raw Markdown instead of the JSON envelope; salvaged it instead of discarding a completed post.")
 
     persisted_row = _ensure_content_persisted(parsed)
+    if source_row_index is not None:
+        _graduate_content_brief(source_row_index, source_keyword)
     _notify_discord(
         title=persisted_row.get("Title", "Untitled"),
         summary=persisted_row.get("Summary", ""),
@@ -689,12 +809,118 @@ async def run_post() -> None:
                 print(f"Failed to send Discord publish notification: {e}")
 
 
+_EDIT_CONTENT_FENCE_RE = re.compile(r"^```(?:markdown)?\s*\n?|\n?```\s*$")
+
+
+async def run_edit_post() -> None:
+    """Applies a single, targeted edit to an existing post's content instead
+    of the blunt approve/disapprove-only workflow -- requested so a specific
+    wording/fact fix doesn't require regenerating (and re-reviewing) the
+    whole post. Triggered by the Discord bot's edit_post_content_tool via
+    workflow_dispatch with EDIT_TITLE/EDIT_INSTRUCTION inputs; runs here
+    (rather than in the bot itself) so it can reuse the same SanityAdapter/
+    markdown-to-Portable-Text conversion the pipeline already has, instead of
+    the bot duplicating that non-trivial conversion logic."""
+    title_reference = os.environ.get("EDIT_TITLE", "").strip()
+    edit_instruction = os.environ.get("EDIT_INSTRUCTION", "").strip()
+    if not title_reference or not edit_instruction:
+        raise RuntimeError("edit_post stage requires EDIT_TITLE and EDIT_INSTRUCTION to both be set.")
+
+    records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    if records.get("status") != "success":
+        raise RuntimeError(f"Failed to read generated_posts: {records}")
+
+    needle = title_reference.strip().lower()
+    match_index = None
+    match_row = None
+    for i, row in enumerate(records.get("data", []), start=2):  # row 1 is the header
+        if needle in str(row.get("Title", "")).strip().lower():
+            match_index = i
+            match_row = row
+            break
+    if match_row is None:
+        raise RuntimeError(f"No post matching '{title_reference}' found in generated_posts.")
+
+    title = str(match_row.get("Title", "")).strip()
+    current_content = str(match_row.get("Generated Content", ""))
+    if not current_content.strip():
+        raise RuntimeError(f"Post '{title}' has no content to edit.")
+
+    edit_result = await custom_runner.run_with_fallback(
+        post_editor_agent,
+        (
+            f"Here is the current blog post content (Markdown):\n\n{current_content}\n\n"
+            f"Apply ONLY this specific edit, and nothing else: {edit_instruction}\n\n"
+            "Preserve everything else exactly as-is -- structure, headings, all links, tone, "
+            "and overall length. Return ONLY the complete revised Markdown content, with no "
+            "preamble, no explanation, no code fence."
+        ),
+        max_turns=5,
+    )
+    new_content = str(getattr(edit_result, "final_output", edit_result)).strip()
+    new_content = _EDIT_CONTENT_FENCE_RE.sub("", new_content).strip()
+    # A drastically shorter response is much more likely a refusal/summary
+    # than a genuine edit -- refuse to overwrite good content with it.
+    if len(new_content) < 0.5 * len(current_content):
+        raise RuntimeError(
+            f"Post Editor Agent's output ({len(new_content)} chars) is suspiciously short "
+            f"next to the original ({len(current_content)} chars); aborting rather than risk "
+            f"corrupting '{title}'. Raw: {new_content[:300]}"
+        )
+
+    headers_result = manage_sheet_data(worksheet_name="generated_posts", action="get_range", cell_range="1:1")
+    header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else _GENERATED_POSTS_FIELDS
+    if "Generated Content" not in header_row:
+        raise RuntimeError("'Generated Content' column not found in generated_posts headers.")
+    update_result = manage_sheet_data(
+        worksheet_name="generated_posts", action="update_cell",
+        row_index=match_index, col_index=header_row.index("Generated Content") + 1,
+        data=new_content,
+    )
+    if update_result.get("status") != "success":
+        raise RuntimeError(f"Failed to save edited content to generated_posts: {update_result}")
+    print(f"[edit_post] Updated Generated Content for '{title}' in generated_posts (row {match_index}).")
+
+    sanity_note = ""
+    if str(match_row.get("Published", "")).strip().lower() == "yes":
+        from lib.sanity_adapter import SanityAdapter
+        try:
+            sanity = SanityAdapter(
+                project_id=os.environ["SANITY_PROJECT_ID"],
+                dataset=os.environ.get("SANITY_DATASET") or "production",
+                token=os.environ["SANITY_API_TOKEN"],
+            )
+            doc = sanity.find_post_by_title(title)
+            if doc and doc.get("_id"):
+                patch_result = sanity.update_post_content(doc["_id"], new_content)
+                if patch_result.get("success"):
+                    sanity_note = " Live Sanity document updated too."
+                    print(f"[edit_post] Patched live Sanity doc {doc['_id']}.")
+                else:
+                    sanity_note = f" WARNING: sheet updated but the live Sanity patch failed: {patch_result.get('error')}"
+                    print(f"[edit_post] Warning: Sanity patch failed: {patch_result.get('error')}")
+            else:
+                sanity_note = " WARNING: post is marked Published but no matching live Sanity document was found by title -- the live site was NOT updated."
+                print(f"[edit_post] Warning: could not find a live Sanity doc titled '{title}'.")
+        except Exception as e:
+            sanity_note = f" WARNING: sheet updated but updating the live Sanity document failed: {e}"
+            print(f"[edit_post] Warning: Sanity update raised an exception: {e}")
+
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if webhook_url:
+        try:
+            _post_discord_message(webhook_url, f"✏️ Edited **{title}**: {edit_instruction}{sanity_note}")
+        except Exception as e:
+            print(f"Failed to send Discord edit notification: {e}")
+
+
 STAGE_HANDLERS = {
     "research": run_research,
     "brief": run_brief,
     "content": run_content,
     "post": run_post,
     "discover_topics": run_discover_topics,
+    "edit_post": run_edit_post,
 }
 
 
@@ -710,10 +936,13 @@ def main() -> None:
         _notify_discord_status(args.stage, success=False, detail=str(e))
         sys.exit(1)
     else:
-        # "content" and "post" already get their own richer notifications
-        # (draft-ready / published-with-URL); a generic success ping on top
-        # would just be noise.
-        if args.stage not in ("content", "post"):
+        # "research"/"brief"/"content"/"post"/"edit_post" already get their
+        # own richer, subject-specific notifications (topic researched /
+        # brief created / draft-ready / published-with-URL / edit summary);
+        # a generic success ping on top would just be noise.
+        # "discover_topics" posts its own per-candidate messages (or
+        # nothing, if it found no candidates).
+        if args.stage not in ("research", "brief", "content", "post", "edit_post"):
             _notify_discord_status(args.stage, success=True)
 
 

@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Optional
 
 import discord
@@ -95,6 +96,10 @@ KEYWORDS_SPREADSHEET_NAME = "ContentSpark_Keywords"
 # rather than hitting that exactly.
 MAX_KEYWORD_CELL_LENGTH = 49000
 
+# "edit_post" is a valid pipeline.yml stage but deliberately excluded here --
+# it requires edit_title/edit_instruction inputs that neither /run nor
+# trigger_stage_tool collect. It's only reachable via edit_post_content_tool,
+# which gathers those and dispatches the workflow directly.
 STAGE_CHOICES = ["research", "brief", "content", "post", "discover_topics"]
 
 # Discord's gateway sends heartbeat-related traffic roughly every ~41s by
@@ -183,6 +188,7 @@ def gather_pipeline_status() -> dict:
         research_records = _get_content_spark_worksheet("research_data").get_all_records()
         ungenerated = [r for r in research_records if str(r.get("Generated", "")).strip().lower() != "yes"]
         status["research_pending_brief"] = len(ungenerated)
+        status["research_pending_samples"] = [str(r.get("Keyword/Topic", "")).strip() for r in ungenerated[:MAX_SAMPLE_ITEMS]]
     except Exception as e:
         logger.warning(f"gather_pipeline_status: failed to read research_data: {e}")
         status["research_pending_brief"] = None
@@ -208,11 +214,16 @@ def gather_pipeline_status() -> dict:
         status["posts_approved_unpublished"] = len(approved_unpublished)
         status["posts_total_generated"] = len(post_records)
         status["pending_review_samples"] = [str(r.get("Title", "")).strip() for r in pending_review[:MAX_SAMPLE_ITEMS]]
+        # Full titles, not just a capped sample -- this is exactly the "what
+        # are the approved-but-unpublished titles" question the bot couldn't
+        # previously answer (it only had the count).
+        status["approved_unpublished_titles"] = [str(r.get("Title", "")).strip() for r in approved_unpublished]
     except Exception as e:
         logger.warning(f"gather_pipeline_status: failed to read generated_posts: {e}")
         status["posts_pending_review"] = None
         status["posts_approved_unpublished"] = None
         status["posts_total_generated"] = None
+        status["approved_unpublished_titles"] = None
 
     try:
         published_records = _get_content_spark_worksheet("published_posts").get_all_records()
@@ -241,8 +252,14 @@ def format_status_report(status: dict) -> str:
     ]
     if status.get("keyword_samples"):
         lines.append("\n**Queued keywords:** " + ", ".join(status["keyword_samples"]))
+    if status.get("research_pending_samples"):
+        lines.append("**Researched, pending brief:** " + ", ".join(status["research_pending_samples"]))
+    if status.get("brief_samples"):
+        lines.append("**Briefed, pending content:** " + ", ".join(status["brief_samples"]))
     if status.get("pending_review_samples"):
         lines.append("**Awaiting review:** " + ", ".join(status["pending_review_samples"]))
+    if status.get("approved_unpublished_titles"):
+        lines.append("**Approved, ready to publish:** " + ", ".join(status["approved_unpublished_titles"]))
     return "\n".join(lines)
 
 
@@ -251,10 +268,14 @@ def get_pipeline_status_tool() -> dict:
     """Returns live counts of what's queued/pending at each ContentSpark
     pipeline stage: keywords queued, research pending a brief, briefs
     pending content, posts awaiting review, approved-but-unpublished posts,
-    total generated posts, and total published posts -- plus a few sample
-    titles for the queued/pending items. Call this whenever the question is
-    about counts, what's queued, or what's currently pending; don't guess
-    numbers."""
+    total generated posts, and total published posts. Also returns actual
+    titles, not just counts: keyword_samples, research_pending_samples,
+    brief_samples, pending_review_samples (all capped samples), and
+    approved_unpublished_titles (the FULL list of approved-but-unpublished
+    post titles, not capped -- use this to answer "what are the approved
+    posts titled" instead of saying you can't see them). Call this whenever
+    the question is about counts, what's queued, what's currently pending,
+    or which specific topics/posts are at a given stage; don't guess."""
     return gather_pipeline_status()
 
 
@@ -285,6 +306,14 @@ _PRIORITIZABLE_QUEUES = [
     (lambda: _get_keywords_worksheet(), "Keyword", "ContentSpark_Keywords", "research"),
     (lambda: _get_content_spark_worksheet("research_data"), "Keyword/Topic", "research_data", "brief"),
     (lambda: _get_content_spark_worksheet("content_briefs"), "Keyword/Topic", "content_briefs", "content"),
+    # generated_posts: the `post` stage's Preparation Agent always reads
+    # approved_unpublished row 2, a filtered view of generated_posts that
+    # preserves generated_posts' own row order -- moving a post to the top
+    # here moves it to the top of that view too, so it's next in line to
+    # actually get published. Matches by Title regardless of its current
+    # Approve/Disapprove or Published value (same as the other queues, this
+    # only reorders, never filters or deletes).
+    (lambda: _get_worksheet(), "Title", "generated_posts", "post"),
 ]
 
 
@@ -327,15 +356,18 @@ def trigger_stage_tool(stage: str) -> dict:
     the same effect as the /run slash command. Valid stages: research,
     brief, content, post, discover_topics. Use this after
     prioritize_topic_tool to actually advance a prioritized topic, or
-    whenever the user asks in chat to run/trigger a specific stage."""
+    whenever the user asks in chat to run/trigger a specific stage. The
+    result includes queued_behind_another_run: if true, tell the user this
+    run will start once the currently-active run finishes, not immediately
+    -- don't imply it's running right now."""
     if stage not in STAGE_CHOICES:
         return {"status": "error", "error": f"'{stage}' is not a valid stage. Valid: {STAGE_CHOICES}"}
     try:
-        dispatch_workflow(stage)
+        already_running = dispatch_workflow(stage)
     except Exception as e:
         logger.exception(f"trigger_stage_tool: failed to dispatch {stage}")
         return {"status": "error", "error": str(e)}
-    return {"status": "triggered", "stage": stage}
+    return {"status": "triggered", "stage": stage, "queued_behind_another_run": already_running}
 
 
 # Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published
@@ -372,6 +404,97 @@ def set_post_approval_tool(title_reference: str, approved: bool) -> dict:
     return _update_generated_posts_column(title_reference, APPROVE_DISAPPROVE_COLUMN, status)
 
 
+# Must match scripts/run_stage.py's _CREATED_AT_FORMAT exactly -- that's the
+# side that actually writes the "Created At" column.
+_CREATED_AT_FORMAT = "%Y-%m-%d %H:%M:%S UTC"
+
+
+def _resolve_latest_post_title() -> Optional[str]:
+    """Falls back to the most recent post still awaiting review
+    (Approve/Disapprove empty), or if none are pending, the most recently
+    generated post overall. Covers the common case where the user is
+    reacting to the draft that was JUST posted for review and just says
+    "shorten the intro" without naming it.
+
+    Prefers the "Created At" column (written deterministically by
+    scripts/run_stage.py) for an unambiguous answer to "which is latest".
+    Falls back to sheet row order if that column is missing/unparseable on
+    every candidate row -- still a reliable recency proxy since rows are
+    only ever appended, but explicit timestamps are worth trusting over
+    positional inference whenever they're actually there."""
+    try:
+        records = _get_worksheet().get_all_records()
+    except Exception as e:
+        logger.warning(f"_resolve_latest_post_title: failed to read generated_posts: {e}")
+        return None
+    if not records:
+        return None
+    pending_review = [r for r in records if not str(r.get("Approve/Disapprove", "")).strip()]
+    candidates = pending_review if pending_review else records
+
+    timestamped = []
+    for row in candidates:
+        raw = str(row.get("Created At", "")).strip()
+        if not raw:
+            continue
+        try:
+            timestamped.append((datetime.strptime(raw, _CREATED_AT_FORMAT), row))
+        except ValueError:
+            continue
+
+    target = max(timestamped, key=lambda pair: pair[0])[1] if timestamped else candidates[-1]
+    title = str(target.get("Title", "")).strip()
+    return title or None
+
+
+@function_tool
+def edit_post_content_tool(edit_instruction: str, title_reference: Optional[str] = None) -> dict:
+    """Requests a targeted content edit to an EXISTING post, instead of full
+    approve/reject or a full regeneration. Use this when the user wants a
+    SPECIFIC change made to a post's content -- e.g. "shorten the intro on
+    X", "fix the claim about Y in the pricing post", "remove the third
+    bullet point" -- as opposed to approving/rejecting/publishing it
+    wholesale, which the other tools already handle.
+
+    title_reference is matched case-insensitively as a partial title. LEAVE
+    IT EMPTY if the user doesn't name a specific post -- most edit requests
+    come right after a draft was posted for review, so they'll often just
+    say "shorten the intro" with no title at all. Omitting title_reference
+    resolves to the most recent post still awaiting review (or, if nothing
+    is pending review, the most recently generated post overall). The
+    result's "title" field tells you which post it actually resolved to --
+    mention that in your reply so the user can correct you if it guessed
+    wrong.
+
+    Does NOT do the edit itself -- it dispatches the pipeline's edit_post
+    stage via GitHub Actions, which runs the actual targeted-edit agent
+    (constrained to change only what was asked and preserve everything else:
+    structure, headings, links, FAQs, tone, and length) and saves the result.
+    If the post is already published, that stage also patches the live
+    Sanity document so the site reflects the edit, not just the sheet. The
+    result includes queued_behind_another_run: if true, tell the user the
+    edit will run once the currently-active pipeline run finishes."""
+    resolved_title = (title_reference or "").strip()
+    if not resolved_title:
+        resolved_title = _resolve_latest_post_title() or ""
+        if not resolved_title:
+            return {"status": "error", "error": "No title given, and there's no post in generated_posts to default to."}
+    try:
+        already_running = dispatch_workflow(
+            "edit_post",
+            extra_inputs={"edit_title": resolved_title, "edit_instruction": edit_instruction},
+        )
+    except Exception as e:
+        logger.exception("edit_post_content_tool: failed to dispatch edit_post")
+        return {"status": "error", "error": str(e)}
+    return {
+        "status": "triggered",
+        "title": resolved_title,
+        "edit_instruction": edit_instruction,
+        "queued_behind_another_run": already_running,
+    }
+
+
 def _build_discord_agent() -> Optional[Agent]:
     if not OPENROUTER_API_KEY:
         return None
@@ -403,6 +526,23 @@ def _build_discord_agent() -> Optional[Agent]:
             "- When the user tells you to approve or reject a specific draft by "
             "name, call set_post_approval_tool instead of telling them to react in "
             "the approval channel -- you can do it directly.\n"
+            "- When the user wants a SPECIFIC change made to a specific existing "
+            "post's content (fix a claim, shorten a section, reword something, "
+            "remove a point) -- as opposed to approving/rejecting/publishing it "
+            "wholesale, or wanting it regenerated from scratch -- call "
+            "edit_post_content_tool with exactly what to change. If they don't name "
+            "which post (very common -- they're usually reacting to whatever draft "
+            "was just posted for review), leave title_reference empty; it defaults "
+            "to the latest post awaiting review. Always mention which post it "
+            "resolved to (the result's \"title\" field) so they can correct you if "
+            "it guessed wrong. It preserves the post's structure, links, FAQs, and "
+            "SEO fields and only changes what was asked; if the post is already "
+            "live it updates the published version too.\n"
+            "- Any tool that can return queued_behind_another_run=true "
+            "(trigger_stage_tool, edit_post_content_tool) means a pipeline run was "
+            "already active when you triggered this one -- say clearly that it's "
+            "queued and will start once the current run finishes, don't imply it's "
+            "running right now.\n"
             "- Do this yourself -- don't just tell the user to run a slash command "
             "or react to a message when you can call these tools directly instead."
         ),
@@ -412,6 +552,7 @@ def _build_discord_agent() -> Optional[Agent]:
             trigger_stage_tool,
             mark_post_published_tool,
             set_post_approval_tool,
+            edit_post_content_tool,
         ],
         model=model,
     )
@@ -438,17 +579,50 @@ async def ask_discord_agent(user_message: str) -> str:
         return f"⚠️ Couldn't get a response: {e}"
 
 
-def dispatch_workflow(stage: str) -> None:
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/pipeline.yml/dispatches"
-    headers = {
+def _github_actions_headers() -> dict:
+    return {
         "Authorization": f"Bearer {GITHUB_PAT}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def _has_in_progress_or_queued_run() -> bool:
+    """Checks whether pipeline.yml already has a run in_progress or queued.
+    pipeline.yml now has a concurrency group with cancel-in-progress: false
+    (added to stop overlapping runs from racing on the same sheet row), so a
+    new manual trigger while another run is active won't start immediately
+    -- it queues behind it. Used to tell the user that plainly instead of
+    implying their trigger started right away."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/pipeline.yml/runs"
+    try:
+        for status in ("in_progress", "queued"):
+            response = requests.get(
+                url, headers=_github_actions_headers(), params={"status": status, "per_page": 1}, timeout=15
+            )
+            response.raise_for_status()
+            if response.json().get("total_count", 0) > 0:
+                return True
+    except Exception as e:
+        logger.warning(f"_has_in_progress_or_queued_run: check failed, assuming none running: {e}")
+    return False
+
+
+def dispatch_workflow(stage: str, extra_inputs: Optional[dict] = None) -> bool:
+    """Dispatches pipeline.yml via workflow_dispatch. Returns True if another
+    run was already in_progress/queued at dispatch time -- meaning this new
+    run will queue behind it rather than start immediately -- so callers can
+    surface that to the user."""
+    already_running = _has_in_progress_or_queued_run()
+    inputs = {"stage": stage}
+    if extra_inputs:
+        inputs.update(extra_inputs)
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/pipeline.yml/dispatches"
     response = requests.post(
-        url, headers=headers, json={"ref": "master", "inputs": {"stage": stage}}, timeout=15
+        url, headers=_github_actions_headers(), json={"ref": "master", "inputs": inputs}, timeout=15
     )
     response.raise_for_status()
+    return already_running
 
 
 def _extract_title(message_content: str):
@@ -574,12 +748,18 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 async def run_stage_command(interaction: discord.Interaction, stage: app_commands.Choice[str]):
     await interaction.response.defer(thinking=True)
     try:
-        dispatch_workflow(stage.value)
+        already_running = dispatch_workflow(stage.value)
     except Exception as e:
         logger.exception("Failed to dispatch workflow for stage %s", stage.value)
         await interaction.followup.send(f"⚠️ Failed to trigger `{stage.value}`: {e}")
         return
-    await interaction.followup.send(f"🚀 Triggered `{stage.value}`. Check the Actions tab for progress.")
+    if already_running:
+        await interaction.followup.send(
+            f"🚀 Triggered `{stage.value}` -- another run is already in progress, "
+            "so this one is queued and will start once it finishes."
+        )
+    else:
+        await interaction.followup.send(f"🚀 Triggered `{stage.value}`. Check the Actions tab for progress.")
 
 
 @bot.tree.command(name="add_topic", description="Add a keyword, concept, problem, or transcript to the research queue")

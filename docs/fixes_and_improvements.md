@@ -1140,3 +1140,49 @@ for the `=== POST_DATA_START ===`/`=== POST_DATA_END ===` markers (or the
 full RunResult repr. Wired into both the Preparation Agent and Contextual
 Image Insertion Agent retry loops, replacing the `"error" not in
 str(...)` checks there.
+
+## Fixed: duplicate Sanity posts (root cause) + Kanban-style pipeline, richer bot
+
+A large batch of related fixes/features, all from the same live report: "its posting same post multiple times, also its not answering correctly."
+
+### Duplicate posts -- actual root cause
+
+Earlier fixes this session (the retry-loop `_sanity_publish_already_succeeded` check) prevented a single run's own retry from re-posting, but duplicates kept happening anyway. The real cause: `SanityAdapter.create_document` used Sanity's plain `create` mutation with **no client-specified `_id`** -- Sanity auto-assigns a random ID on every call, so *any* repeat of the same publish (a network retry after the first request actually succeeded, an agent-level retry, or two overlapping GitHub Actions runs racing on the same sheet row) minted a brand-new duplicate document. There was no dedup anywhere in the chain, and `create_document`'s response-parsing even had a `'unknown_but_likely_created'` fallback ID for when it couldn't tell if creation had worked.
+
+Fixed by giving posts a deterministic, slug-derived `_id` (`f"post-{slug}"`) and switching `create_document` to Sanity's `createIfNotExists` mutation -- the same idempotent pattern the codebase already used for author documents (`ensure_document_exists`), just never applied to the post document itself. Republishing the same slug is now a safe no-op instead of a new document. `create_document` also no longer needs the fragile ID-extraction heuristics -- it trusts the caller-supplied `_id`.
+
+Also added a `concurrency: {group: contentspark-pipeline, cancel-in-progress: false}` block to `pipeline.yml` as defense-in-depth: a scheduled run and a Discord-triggered manual run (or two manual triggers close together) now queue sequentially instead of racing on the same row, avoiding wasted duplicate LLM/image work even though Sanity itself is now separately safe.
+
+### Discord bot: no logs in Dokploy
+
+Same root cause as an earlier fix to `pipeline.yml`'s GitHub Actions logs: Python fully block-buffers stdout when it isn't a TTY (always true in a container), so the bot's `logger.info()` output sat in a buffer Dokploy's log viewer never saw flushed. Added `ENV PYTHONUNBUFFERED=1` to `discord_bot/Dockerfile`.
+
+### Kanban-style sheet graduation
+
+Per explicit request: once a research_data row's brief is safely in content_briefs, delete the research_data row (not just mark it `Generated=Yes`, the previous behavior); once a content_briefs row's content is safely in generated_posts, delete that content_briefs row too. Keywords in `ContentSpark_Keywords` and anything in `generated_posts`/`published_posts` are never touched -- only the intermediate working rows. Implemented deterministically in `scripts/run_stage.py` (`_graduate_research_row`, `_graduate_content_brief`), not left to the agent's own tool calls, consistent with this session's established pattern of not trusting an LLM's self-reported sheet writes.
+
+### Research/brief Discord messages now name their subject
+
+`research`/`brief` used to post a content-free "✅ Stage X completed." ping. `combined_research_workflow` now returns the Triage Agent's actually-selected keyword; `run_research()`/`run_brief()` post "🔎 Researched **X**" / "📝 Brief created for **X**" instead, and are excluded from the generic ping (same reasoning `content`/`post` already were).
+
+### Bot: real titles, not just counts
+
+`gather_pipeline_status()` only returned counts for approved-but-unpublished posts -- confirmed live, the bot had to say "I can't pull the title" when asked. Added `approved_unpublished_titles` (the full list, not capped) plus `research_pending_samples`, surfaced in both `/status` and the chat tool's return.
+
+### Bot: prioritize now covers generated_posts too
+
+`prioritize_topic_tool`'s queue list covered ContentSpark_Keywords/research_data/content_briefs but not generated_posts -- so "post this one first" for an already-approved-but-unpublished post had no queue to act on. Added generated_posts (matched by Title, next stage `post`) -- the `post` stage's Preparation Agent reads a filtered view of generated_posts that preserves its row order, so moving a post to the top there moves it to the front of the publish queue too.
+
+### Bot: reports when a manual trigger queues behind another run
+
+Now that `pipeline.yml` has a concurrency group, a manual trigger while another run is active won't start immediately -- it queues. `dispatch_workflow` now checks GitHub Actions for an in-progress/queued run before dispatching and returns whether the new trigger queued behind it; `/run`, `trigger_stage_tool`, and `edit_post_content_tool` all surface this instead of implying the run started right away.
+
+### New: targeted post-edit tool preserving SEO fields
+
+Per explicit request: approve/disapprove was the only lever on a generated post -- no way to request a specific change ("shorten the intro", "fix this claim") without a full regeneration. Added an `edit_post` pipeline stage (`scripts/run_stage.py::run_edit_post`, triggered via `workflow_dispatch` with `edit_title`/`edit_instruction` inputs) that runs a new, tightly-scoped `post_editor_agent` (`blog_agent/blog_agents.py`) instructed to change *only* what was asked and preserve structure/headings/links/FAQs/tone/length. The edited content is saved back to `generated_posts`, and if the post is already published, the live Sanity document is patched too (`SanityAdapter.update_post_content`, resolving the real document `_id` via a new `find_post_by_title` GROQ lookup rather than re-guessing the slug).
+
+The Discord side (`edit_post_content_tool`) doesn't do the edit itself -- it just dispatches the workflow, so it reuses the pipeline's existing Markdown-to-Portable-Text conversion (`SanityAdapter._markdown_to_processed_blocks`, extracted out of `post_blog` for reuse) instead of the bot duplicating that non-trivial logic, keeping the bot's independent-deploy boundary intact. `title_reference` is optional: most edit requests come right after a draft was posted for review with no title named at all, so an empty reference resolves to the most recent post still awaiting review.
+
+### "Created At" timestamp column
+
+Per explicit request: "latest" was only inferred from sheet row order, with no actual timestamp to point to. Added a self-healing "Created At" column (added automatically to `content_briefs`/`generated_posts` the first time it's needed, no manual sheet edit required) stamped deterministically in Python whenever a brief/content row is persisted (`scripts/run_stage.py::_stamp_created_at`). The bot's `_resolve_latest_post_title` now prefers this timestamp when present, falling back to row order only for older rows that predate the column.

@@ -376,7 +376,11 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     if output_result is None or "error" in str(output_result):
         return {"error": f"Output Agent failed after {max_retries} attempts: {str(output_result)}"}
 
-    return output_result
+    # input_string is the Triage Agent's exact selected keyword/topic (its
+    # prompt requires returning it unmodified) -- surfaced here so the caller
+    # can report which topic research actually ran against, instead of a
+    # content-free "stage completed" ping.
+    return {"status": "success", "keyword": input_string.strip(), "result": str(output_result)}
 
 
 async def run_topic_discovery_workflow(max_retries: int = 2, max_turns: int = 20) -> Dict:

@@ -349,6 +349,29 @@ content_generator_agent = Agent(
     model_settings=ModelSettings(temperature=0.7),
 )
 
+post_editor_agent = Agent(
+    name="Post Editor Agent",
+    instructions="""
+    You are a precise content editor for an existing, already-written SEO blog post.
+    You will be given the full current Markdown content of a post and a specific edit
+    instruction. Apply ONLY that instruction -- do not rewrite, restructure, re-order,
+    or "improve" anything else, and do not regenerate the post from scratch.
+
+    Rules:
+    - Preserve every heading exactly as it is unless the instruction specifically asks to change a heading.
+    - Preserve every internal and external link (the exact [text](url) markdown) unless the instruction specifically asks to change a link.
+    - Preserve the overall structure, section order, and approximate length.
+    - Preserve the writing style, tone, and person (first-person "I") already present in the content.
+    - Do not add a "Related Posts" section, and do not add an H1 (the title is rendered separately from this content).
+    - Make the smallest change that satisfies the instruction.
+    - Return ONLY the complete revised Markdown content -- no preamble, no explanation, no code fence, no commentary about what changed.
+    """,
+    tools=[],
+    hooks=MyAgentHooks(),
+    model=custom_runner.get_model_by_name("gemini-flash-latest"),
+    model_settings=ModelSettings(temperature=0.3),
+)
+
 brief_agent = Agent(
     name="Brief Agent",
     instructions="""

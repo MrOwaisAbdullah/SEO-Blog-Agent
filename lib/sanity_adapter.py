@@ -387,14 +387,24 @@ class SanityAdapter:
 
     def create_document(self, document: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
         """
-        Creates a document in Sanity using the older Mutations API.
-        Improved ID extraction logic.
+        Creates a document in Sanity using the Mutations API's createIfNotExists,
+        keyed on the caller-supplied document["_id"]. This makes the call
+        idempotent: retrying it (network retry, agent-level retry, or a second
+        pipeline run racing on the same slug) after a first call already
+        succeeded is a safe no-op instead of a second live document with a
+        fresh random ID. Previously used plain `create` with no client _id and
+        tried to guess the resulting ID out of the response body -- since we
+        now choose the _id ourselves, there's nothing left to guess.
         """
+        if not document.get("_id"):
+            return {"success": False, "error": "create_document requires document['_id'] to be set for idempotency."}
+
+        document_id = document["_id"]
         endpoint = f"/data/mutate/{self.dataset}"
         payload = {
             "mutations": [
                 {
-                    "create": document
+                    "createIfNotExists": document
                 }
             ]
         }
@@ -403,9 +413,9 @@ class SanityAdapter:
         while attempt < max_retries:
             try:
                 full_url = f"{self.base_url}{endpoint}"
-                logger.debug(f"[SanityAdapter.create_document] Using Mutations API")
+                logger.debug(f"[SanityAdapter.create_document] Using Mutations API (createIfNotExists)")
                 logger.debug(f"[SanityAdapter.create_document] Constructed full URL: {full_url}")
-                logger.info(f"[SanityAdapter.create_document] Attempt {attempt + 1}: Making POST request")
+                logger.info(f"[SanityAdapter.create_document] Attempt {attempt + 1}: Making POST request for _id={document_id}")
                 logger.debug(f"[SanityAdapter.create_document] URL: {full_url}")
                 logger.debug(f"[SanityAdapter.create_document] Headers: {self.headers}")
                 logger.debug(f"[SanityAdapter.create_document] Payload: {json.dumps(payload, indent=2)}")
@@ -416,77 +426,17 @@ class SanityAdapter:
                 result_data = response.json()
                 logger.debug(f"[SanityAdapter.create_document] Response JSON: {json.dumps(result_data, indent=2)}")
 
-                # --- Improved ID Extraction Logic ---
-                document_id = None
+                if "error" in result_data:
+                    error_details = result_data["error"]
+                    logger.error(f"[SanityAdapter.create_document] API returned 200 but body contains error: {error_details}")
+                    return {"success": False, "error": f"API error in response body: {error_details}"}
 
-                # Method 1: Check if ID is directly in the response body (common for auto-generated IDs)
-                if "documentId" in result_data:
-                    document_id = result_data["documentId"]
-                    logger.debug(f"[SanityAdapter.create_document] Found document ID in 'documentId': {document_id}")
-
-                # Method 2: Check the results array (standard location)
-                if not document_id:
-                    results = result_data.get("results", [])
-                    if results:
-                        # The ID might be in the first result, or we might need to iterate
-                        first_result = results[0] if len(results) > 0 else {}
-                        # Check if 'id' is directly in the result item (standard)
-                        if "id" in first_result:
-                            document_id = first_result["id"]
-                            logger.debug(f"[SanityAdapter.create_document] Found document ID in 'results[0].id': {document_id}")
-                        # Check if 'id' is nested under a 'document' key in the result (less common, but possible in some ops)
-                        elif "document" in first_result and isinstance(first_result["document"], dict) and "_id" in first_result["document"]:
-                            document_id = first_result["document"]["_id"]
-                            logger.debug(f"[SanityAdapter.create_document] Found document ID in 'results[0].document._id': {document_id}")
-
-                # Method 3: If the document being created has an _id specified client-side,
-                # the API might echo it back or confirm creation without a new ID in results.
-                # This is less relevant if Sanity auto-generates the ID.
-
-                # --- Determine Success ---
-                if document_id:
-                    # If we found an ID, consider it a success
-                    logger.info(f"[SanityAdapter.create_document] Document created successfully with ID: {document_id}")
-                    return {
-                        "success": True,
-                        "document_id": document_id,
-                        "results": result_data # Return full response for inspection
-                    }
-                else:
-                    # If no ID was found, it's ambiguous. The 200 status means the request was processed,
-                    # but maybe the document already existed (if using 'create' and it fails silently?)
-                    # or the ID isn't returned in the expected places.
-                    # Let's check for other success indicators or errors in the response.
-                    # Sanity usually returns an error in the body if the mutation failed, even with 200.
-                    # If we got here and results exist, it might be a success without an easy-to-find ID.
-                    # However, the most likely case is we just missed the ID.
-
-                    # Log a more detailed warning about the response structure
-                    logger.warning(
-                        f"[SanityAdapter.create_document] Mutation returned 200 OK, but document ID could not be extracted. "
-                        f"Response keys: {list(result_data.keys())}. "
-                        f"Results (if any): {result_data.get('results', 'N/A')}. "
-                        f"Full response data keys sample: {list(result_data.keys())[:10] if isinstance(result_data, dict) else 'N/A'}"
-                    )
-                    # Assume success if status 200 and no explicit error, even if ID parsing failed.
-                    # This is risky, but returning an error here prevents successful posts.
-                    # A better way is to ensure ID is always returned or query for it.
-                    # For now, let's assume success based on 200 OK and no error in response.
-                    # Check for explicit error in response body
-                    if "error" in result_data:
-                        error_details = result_data["error"]
-                        logger.error(f"[SanityAdapter.create_document] API returned 200 but body contains error: {error_details}")
-                        return {"success": False, "error": f"API error in response body: {error_details}"}
-
-                    logger.info("[SanityAdapter.create_document] Assuming success based on 200 OK status and no ID parsing error or explicit API error.")
-                    return {
-                        "success": True,
-                        "document_id": "unknown_but_likely_created", # Indicate ID parsing issue
-                        "message": "Document creation requested successfully (200 OK), but ID could not be extracted from response. Check Sanity Studio.",
-                        "results": result_data
-                    }
-
-                # --- End Improved ID Extraction Logic ---
+                logger.info(f"[SanityAdapter.create_document] Document ensured with ID: {document_id}")
+                return {
+                    "success": True,
+                    "document_id": document_id,
+                    "results": result_data
+                }
 
 
             except requests.exceptions.HTTPError as e:
@@ -515,6 +465,273 @@ class SanityAdapter:
         return {"success": False, "error": "Max retries exceeded in create_document (Unexpected flow)"}
 
 
+
+    def _markdown_to_processed_blocks(self, content: str) -> List[Dict[str, Any]]:
+        """Converts Markdown to Sanity Portable Text blocks and uploads any
+        embedded images (contextual images inserted mid-content) as real
+        Sanity assets, replacing their raw URLs with asset references --
+        Sanity's `image` block type requires an uploaded asset, it can't
+        just link an external URL the way mainImage/Pexel handling allows
+        elsewhere. Extracted out of post_blog so update_post_content (partial,
+        post-publish content edits) gets the exact same image handling
+        instead of a cheaper reimplementation that would silently break any
+        post that has contextual images."""
+        try:
+            cleaned_content = '\n'.join([line.lstrip() for line in content.split('\n')]).strip() if content else ""
+            logger.debug(f"Original content first 100 chars: {content[:100] if content else 'empty'}")
+            logger.debug(f"Cleaned content first 100 chars: {cleaned_content[:100] if cleaned_content else 'empty'}")
+
+            content_blocks = markdown_to_sanity_blocks(cleaned_content, debug=True)
+
+            if not content_blocks:
+                logger.warning("Markdown parser returned no blocks for content.")
+                content_blocks = [{
+                    "_key": str(uuid.uuid4()),
+                    "_type": "block",
+                    "children": [{
+                        "_key": str(uuid.uuid4()),
+                        "_type": "span",
+                        "text": "No content generated or parsing resulted in empty blocks"
+                    }],
+                    "markDefs": [],
+                    "style": "normal"
+                }]
+
+        except Exception as parse_error:
+            error_msg = f"Error converting Markdown to Sanity blocks: {parse_error}"
+            logger.error(error_msg, exc_info=True)
+            fallback_content = content.strip() if content else ""
+            content_blocks = [
+                {
+                    "_key": str(uuid.uuid4()),
+                    "_type": "block",
+                    "children": [
+                        {
+                            "_key": str(uuid.uuid4()),
+                            "_type": "span",
+                            "text": f"[Content Conversion Error: {str(parse_error)}]",
+                            "marks": ["strong"]
+                        }
+                    ],
+                    "markDefs": [],
+                    "style": "normal"
+                },
+                {
+                    "_key": str(uuid.uuid4()),
+                    "_type": "block",
+                    "children": [
+                        {
+                            "_key": str(uuid.uuid4()),
+                            "_type": "span",
+                            "text": fallback_content
+                        }
+                    ],
+                    "markDefs": [],
+                    "style": "normal"
+                }
+            ]
+
+        # Process content blocks - upload images and replace URLs with asset references
+        processed_blocks = []
+        for block in content_blocks:
+            if block.get("_type") == "image":
+                # Handle embedded images in content
+                image_url = block.get("asset", {}).get("url")
+                if image_url:
+                    logger.info(f"[SanityAdapter] Processing embedded image: {image_url}")
+                    try:
+                        # Download and upload the image to Sanity
+                        if image_url.startswith("http"):
+                            # Remote image - download first
+                            # Clean the image URL by removing query parameters to avoid file system issues
+                            clean_image_url = image_url.split('?')[0]
+                            import tempfile
+                            import requests
+                            response = requests.get(clean_image_url)
+                            response.raise_for_status()
+
+                            # Get file extension from cleaned URL or content type
+                            ext = os.path.splitext(clean_image_url)[1] or ".jpg"
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                                tmp.write(response.content)
+                                temp_image_path = tmp.name
+
+                            logger.info(f"[SanityAdapter] Downloaded image from {clean_image_url} to: {temp_image_path}")
+
+                            # Upload to Sanity
+                            upload_result = self.upload_image(temp_image_path)
+                            os.unlink(temp_image_path)  # Clean up temp file
+
+                            if upload_result.get("success"):
+                                logger.info(f"[SanityAdapter] Successfully uploaded image: {upload_result}")
+                                # Replace the image block with a proper Sanity image reference
+                                new_block = {
+                                    "_key": block.get("_key", str(uuid.uuid4())),
+                                    "_type": "image",
+                                    "asset": {
+                                        "_type": "reference",
+                                        "_ref": upload_result["asset_id"]
+                                    }
+                                }
+                                # Preserve alt text and title if they exist
+                                if "alt" in block:
+                                    new_block["alt"] = block["alt"]
+                                if "title" in block:
+                                    new_block["title"] = block["title"]
+                                processed_blocks.append(new_block)
+                            else:
+                                # If upload fails, keep the original block or create a placeholder
+                                logger.warning(f"[SanityAdapter] Failed to upload embedded image: {upload_result.get('error')}")
+                                # Create a text block as fallback with more descriptive error
+                                alt_text = block.get("alt", "Embedded image")
+                                fallback_block = {
+                                    "_key": str(uuid.uuid4()),
+                                    "_type": "block",
+                                    "children": [
+                                        {
+                                            "_key": str(uuid.uuid4()),
+                                            "_type": "span",
+                                            "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]"
+                                        }
+                                    ],
+                                    "markDefs": [],
+                                    "style": "normal"
+                                }
+                                processed_blocks.append(fallback_block)
+                        else:
+                            # Local image - upload directly
+                            # Check if the file exists first
+                            if os.path.exists(image_url):
+                                upload_result = self.upload_image(image_url)
+                                if upload_result.get("success"):
+                                    # Replace the image block with a proper Sanity image reference
+                                    new_block = {
+                                        "_key": block.get("_key", str(uuid.uuid4())),
+                                        "_type": "image",
+                                        "asset": {
+                                            "_type": "reference",
+                                            "_ref": upload_result["asset_id"]
+                                        }
+                                    }
+                                    # Preserve alt text and title if they exist
+                                    if "alt" in block:
+                                        new_block["alt"] = block["alt"]
+                                    if "title" in block:
+                                        new_block["title"] = block["title"]
+                                    processed_blocks.append(new_block)
+                                else:
+                                    # If upload fails, keep the original block or create a placeholder
+                                    logger.warning(f"Failed to upload embedded image: {upload_result.get('error')}")
+                                    # Create a text block as fallback
+                                    alt_text = block.get("alt", "Embedded image")
+                                    fallback_block = {
+                                        "_key": str(uuid.uuid4()),
+                                        "_type": "block",
+                                        "children": [
+                                            {
+                                                "_key": str(uuid.uuid4()),
+                                                "_type": "span",
+                                                "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]"
+                                            }
+                                        ],
+                                        "markDefs": [],
+                                        "style": "normal"
+                                    }
+                                    processed_blocks.append(fallback_block)
+                            else:
+                                logger.warning(f"Local image file does not exist: {image_url}")
+                                # Create a text block as fallback
+                                alt_text = block.get("alt", "Embedded image")
+                                fallback_block = {
+                                    "_key": str(uuid.uuid4()),
+                                    "_type": "block",
+                                    "children": [
+                                        {
+                                            "_key": str(uuid.uuid4()),
+                                            "_type": "span",
+                                            "text": f"[Image: {alt_text} - File not found: {image_url}]"
+                                        }
+                                    ],
+                                    "markDefs": [],
+                                    "style": "normal"
+                                }
+                                processed_blocks.append(fallback_block)
+                    except Exception as e:
+                        logger.error(f"Error processing embedded image: {e}", exc_info=True)
+                        # Create a text block as fallback
+                        alt_text = block.get("alt", "Embedded image")
+                        fallback_block = {
+                            "_key": str(uuid.uuid4()),
+                            "_type": "block",
+                            "children": [
+                                {
+                                    "_key": str(uuid.uuid4()),
+                                    "_type": "span",
+                                    "text": f"[Image: {alt_text} - Processing error: {str(e)}]"
+                                }
+                            ],
+                            "markDefs": [],
+                            "style": "normal"
+                        }
+                        processed_blocks.append(fallback_block)
+                else:
+                    # No URL, keep the block as is
+                    processed_blocks.append(block)
+            elif block.get("_type") == "block":
+                # Process text blocks to make sure inline images in markdown are handled properly
+                # (though our markdown parser should prevent inline images in text blocks)
+                processed_blocks.append(block)
+            else:
+                # Other types of blocks, keep as is
+                processed_blocks.append(block)
+
+        return processed_blocks
+
+    def find_post_by_title(self, title: str) -> Optional[Dict[str, str]]:
+        """Looks up a published post's _id/slug by exact title via GROQ.
+        Used by edit flows that only have the title on hand (e.g. a
+        Discord-requested content edit) and need the document's real,
+        authoritative _id -- recomputing it by re-slugifying the title would
+        risk drifting from whatever slug was actually chosen at publish
+        time (the Preparation Agent derives it, not a pure deterministic
+        function of the title alone)."""
+        query = '*[_type == "post" && title == $title][0]{_id, "slug": slug.current}'
+        query_url = self._build_query_endpoint(query, {"title": title})
+        try:
+            response = self._make_request("GET", query_url, data=None, max_retries=2)
+            response.raise_for_status()
+            result = response.json().get("result")
+            return result if result else None
+        except Exception as e:
+            logger.warning(f"[SanityAdapter.find_post_by_title] Lookup failed for '{title}': {e}")
+            return None
+
+    def update_post_content(self, doc_id: str, content_markdown: str) -> Dict[str, Any]:
+        """Patches an already-published post's body `content` field in
+        place, identified by its actual Sanity _id (resolve via
+        find_post_by_title first if you only have the title). Everything
+        else about the document (title, slug, author, mainImage, categories,
+        FAQs, summary) is left untouched; only the body content blocks are
+        replaced. Used for targeted post-publish content edits requested by
+        title, so a small wording/fact fix doesn't require regenerating and
+        republishing the entire post."""
+        content_blocks = self._markdown_to_processed_blocks(content_markdown)
+        payload = {"mutations": [{"patch": {"id": doc_id, "set": {"content": content_blocks}}}]}
+        try:
+            response = self._make_request("POST", f"/data/mutate/{self.dataset}", data=payload, max_retries=3)
+            response.raise_for_status()
+            return {"success": True, "document_id": doc_id}
+        except requests.exceptions.HTTPError as e:
+            try:
+                error_details = e.response.json()
+                error_msg = f"Patch failed (HTTP {e.response.status_code}): {error_details.get('error', error_details)}"
+            except Exception:
+                error_msg = f"Patch failed (HTTP {e.response.status_code}): {e}"
+            logger.error(f"[SanityAdapter.update_post_content] {error_msg}")
+            return {"success": False, "error": error_msg}
+        except Exception as e:
+            logger.error(f"[SanityAdapter.update_post_content] Unexpected error: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     def post_blog(self, title: str, summary: str, content: str, categories: List[str],
                   local_image_path: str, slug: str, alt_text: str, faqs: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -679,218 +896,9 @@ class SanityAdapter:
                 image_asset_id = image_upload_result["asset_id"]
                 image_url = image_upload_result.get("url")
 
-            # 3. Prepare Document Content
-            try:
-                cleaned_content = '\n'.join([line.lstrip() for line in content.split('\n')]).strip() if content else ""
-                logger.debug(f"Original content first 100 chars: {content[:100] if content else 'empty'}")
-                logger.debug(f"Cleaned content first 100 chars: {cleaned_content[:100] if cleaned_content else 'empty'}")
-                
-                content_blocks = markdown_to_sanity_blocks(cleaned_content, debug=True)
-                
-                if not content_blocks:
-                    logger.warning("Markdown parser returned no blocks for content.")
-                    content_blocks = [{
-                        "_key": str(uuid.uuid4()),
-                        "_type": "block",
-                        "children": [{
-                            "_key": str(uuid.uuid4()),
-                            "_type": "span",
-                            "text": "No content generated or parsing resulted in empty blocks"
-                        }],
-                        "markDefs": [],
-                        "style": "normal"
-                    }]
-                    
-            except Exception as parse_error:
-                error_msg = f"Error converting Markdown to Sanity blocks: {parse_error}"
-                logger.error(error_msg, exc_info=True)
-                fallback_content = content.strip() if content else ""
-                content_blocks = [
-                    {
-                        "_key": str(uuid.uuid4()),
-                        "_type": "block",
-                        "children": [
-                            {
-                                "_key": str(uuid.uuid4()),
-                                "_type": "span",
-                                "text": f"[Content Conversion Error: {str(parse_error)}]",
-                                "marks": ["strong"]
-                            }
-                        ],
-                        "markDefs": [],
-                        "style": "normal"
-                    },
-                    {
-                        "_key": str(uuid.uuid4()),
-                        "_type": "block",
-                        "children": [
-                            {
-                                "_key": str(uuid.uuid4()),
-                                "_type": "span",
-                                "text": fallback_content
-                            }
-                        ],
-                        "markDefs": [],
-                        "style": "normal"
-                    }
-                ]
-
-            # 4. Process content blocks - upload images and replace URLs with asset references
-            processed_blocks = []
-            for block in content_blocks:
-                if block.get("_type") == "image":
-                    # Handle embedded images in content
-                    image_url = block.get("asset", {}).get("url")
-                    if image_url:
-                        logger.info(f"[SanityAdapter.post_blog] Processing embedded image: {image_url}")
-                        try:
-                            # Download and upload the image to Sanity
-                            if image_url.startswith("http"):
-                                # Remote image - download first
-                                # Clean the image URL by removing query parameters to avoid file system issues
-                                clean_image_url = image_url.split('?')[0]
-                                import tempfile
-                                import requests
-                                response = requests.get(clean_image_url)
-                                response.raise_for_status()
-                                
-                                # Get file extension from cleaned URL or content type
-                                ext = os.path.splitext(clean_image_url)[1] or ".jpg"
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                                    tmp.write(response.content)
-                                    temp_image_path = tmp.name
-                                
-                                logger.info(f"[SanityAdapter.post_blog] Downloaded image from {clean_image_url} to: {temp_image_path}")
-                                
-                                # Upload to Sanity
-                                upload_result = self.upload_image(temp_image_path)
-                                os.unlink(temp_image_path)  # Clean up temp file
-                                
-                                if upload_result.get("success"):
-                                    logger.info(f"[SanityAdapter.post_blog] Successfully uploaded image: {upload_result}")
-                                    # Replace the image block with a proper Sanity image reference
-                                    new_block = {
-                                        "_key": block.get("_key", str(uuid.uuid4())),
-                                        "_type": "image",
-                                        "asset": {
-                                            "_type": "reference",
-                                            "_ref": upload_result["asset_id"]
-                                        }
-                                    }
-                                    # Preserve alt text and title if they exist
-                                    if "alt" in block:
-                                        new_block["alt"] = block["alt"]
-                                    if "title" in block:
-                                        new_block["title"] = block["title"]
-                                    processed_blocks.append(new_block)
-                                else:
-                                    # If upload fails, keep the original block or create a placeholder
-                                    logger.warning(f"[SanityAdapter.post_blog] Failed to upload embedded image: {upload_result.get('error')}")
-                                    # Create a text block as fallback with more descriptive error
-                                    alt_text = block.get("alt", "Embedded image")
-                                    fallback_block = {
-                                        "_key": str(uuid.uuid4()),
-                                        "_type": "block",
-                                        "children": [
-                                            {
-                                                "_key": str(uuid.uuid4()),
-                                                "_type": "span",
-                                                "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]" 
-                                            }
-                                        ],
-                                        "markDefs": [],
-                                        "style": "normal"
-                                    }
-                                    processed_blocks.append(fallback_block)
-                            else:
-                                # Local image - upload directly
-                                # Check if the file exists first
-                                if os.path.exists(image_url):
-                                    upload_result = self.upload_image(image_url)
-                                    if upload_result.get("success"):
-                                        # Replace the image block with a proper Sanity image reference
-                                        new_block = {
-                                            "_key": block.get("_key", str(uuid.uuid4())),
-                                            "_type": "image",
-                                            "asset": {
-                                                "_type": "reference",
-                                                "_ref": upload_result["asset_id"]
-                                            }
-                                        }
-                                        # Preserve alt text and title if they exist
-                                        if "alt" in block:
-                                            new_block["alt"] = block["alt"]
-                                        if "title" in block:
-                                            new_block["title"] = block["title"]
-                                        processed_blocks.append(new_block)
-                                    else:
-                                        # If upload fails, keep the original block or create a placeholder
-                                        logger.warning(f"Failed to upload embedded image: {upload_result.get('error')}")
-                                        # Create a text block as fallback
-                                        alt_text = block.get("alt", "Embedded image")
-                                        fallback_block = {
-                                            "_key": str(uuid.uuid4()),
-                                            "_type": "block",
-                                            "children": [
-                                                {
-                                                    "_key": str(uuid.uuid4()),
-                                                    "_type": "span",
-                                                    "text": f"[Image: {alt_text} - Upload failed: {upload_result.get('error', 'Unknown error')}]" 
-                                                }
-                                            ],
-                                            "markDefs": [],
-                                            "style": "normal"
-                                        }
-                                        processed_blocks.append(fallback_block)
-                                else:
-                                    logger.warning(f"Local image file does not exist: {image_url}")
-                                    # Create a text block as fallback
-                                    alt_text = block.get("alt", "Embedded image")
-                                    fallback_block = {
-                                        "_key": str(uuid.uuid4()),
-                                        "_type": "block",
-                                        "children": [
-                                            {
-                                                "_key": str(uuid.uuid4()),
-                                                "_type": "span",
-                                                "text": f"[Image: {alt_text} - File not found: {image_url}]" 
-                                            }
-                                        ],
-                                        "markDefs": [],
-                                        "style": "normal"
-                                    }
-                                    processed_blocks.append(fallback_block)
-                        except Exception as e:
-                            logger.error(f"Error processing embedded image: {e}", exc_info=True)
-                            # Create a text block as fallback
-                            alt_text = block.get("alt", "Embedded image")
-                            fallback_block = {
-                                "_key": str(uuid.uuid4()),
-                                "_type": "block",
-                                "children": [
-                                    {
-                                        "_key": str(uuid.uuid4()),
-                                        "_type": "span",
-                                        "text": f"[Image: {alt_text} - Processing error: {str(e)}]" 
-                                    }
-                                ],
-                                "markDefs": [],
-                                "style": "normal"
-                            }
-                            processed_blocks.append(fallback_block)
-                    else:
-                        # No URL, keep the block as is
-                        processed_blocks.append(block)
-                elif block.get("_type") == "block":
-                    # Process text blocks to make sure inline images in markdown are handled properly
-                    # (though our markdown parser should prevent inline images in text blocks)
-                    processed_blocks.append(block)
-                else:
-                    # Other types of blocks, keep as is
-                    processed_blocks.append(block)
-
-            # Update content_blocks with processed blocks
-            content_blocks = processed_blocks
+            # 3-4. Prepare document content: Markdown -> Portable Text blocks,
+            # with embedded images uploaded as real Sanity assets.
+            content_blocks = self._markdown_to_processed_blocks(content)
 
             # 5. Prepare FAQs
             formatted_faqs = []
@@ -920,8 +928,19 @@ class SanityAdapter:
             # 7. Construct Document Object
             full_url = f"https://owaisabdullah.dev/blog/{slug}"
 
+            # Deterministic, slug-derived _id: create_document uses Sanity's
+            # createIfNotExists mutation keyed on this, so publishing the same
+            # slug twice (concurrent pipeline runs, an agent-level retry, a
+            # network retry after the first request actually succeeded, or a
+            # manual re-trigger after the sheet's Published flag failed to
+            # write) is a no-op instead of a second live document. Confirmed
+            # live: plain `create` with no client _id let every one of those
+            # paths mint a fresh random-ID duplicate post on the site.
+            doc_id = f"post-{slug}"
+
             document = {
                 "_type": "post",
+                "_id": doc_id,
                 "title": title,
                 "summary": summary,
                 "slug": {"_type": "slug", "current": slug},

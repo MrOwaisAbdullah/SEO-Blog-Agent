@@ -31,6 +31,29 @@ on:
           - content
           - post
           - discover_topics
+          - edit_post
+      edit_title:
+        description: '(edit_post only) Title (or partial title) of the post to edit'
+        required: false
+        type: string
+      edit_instruction:
+        description: '(edit_post only) The specific change to make to that post'
+        required: false
+        type: string
+
+# Without this, a scheduled run and a Discord-triggered manual run (or two
+# manual triggers close together) can execute at the same time. Preparation
+# Agent always reads a fixed row (approved_unpublished row 2 / first
+# available research/brief row) with no claiming mechanism, so two
+# overlapping runs can both pick up the same row before either one's writes
+# land -- wasted LLM/image calls at minimum, duplicate sheet rows at worst.
+# (Sanity publishing itself is now separately idempotent by slug -- see
+# lib/sanity_adapter.py -- but this avoids the wasted work in the first
+# place.) cancel-in-progress: false means a second trigger queues and runs
+# after the first finishes, rather than being dropped.
+concurrency:
+  group: contentspark-pipeline
+  cancel-in-progress: false
 
 jobs:
   run-stage:
@@ -79,6 +102,10 @@ jobs:
           SANITY_DEFAULT_AUTHOR_NAME: ${{ secrets.SANITY_DEFAULT_AUTHOR_NAME }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Only meaningful for stage=edit_post; empty on every other trigger
+          # (scheduled runs and workflow_dispatch runs for other stages).
+          EDIT_TITLE: ${{ github.event.inputs.edit_title }}
+          EDIT_INSTRUCTION: ${{ github.event.inputs.edit_instruction }}
           # Python block-buffers stdout when it isn't a TTY (i.e. always, in
           # Actions) -- print()/logger output can sit in the buffer for
           # minutes and land in the log wildly out of real chronological
