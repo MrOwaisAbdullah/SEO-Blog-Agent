@@ -20,7 +20,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
@@ -356,6 +356,107 @@ def _stamp_created_at(worksheet_name: str, key_column: str, key_value: str) -> N
         manage_sheet_data(worksheet_name=worksheet_name, action="update_cell", row_index=lookup["row_index"], col_index=col_index, data=_timestamp_now())
     except Exception as e:
         print(f"Warning: failed to stamp Created At on {worksheet_name} for '{key_value}': {e}")
+
+
+def _stamp_check_column(worksheet_name: str, key_column: str, key_value: str, check_column_name: str) -> None:
+    """Records when a row was last reviewed by a given review stage
+    (freshness sweep / search performance review), adding that column if it
+    doesn't exist yet. Unlike _stamp_created_at, this ALWAYS overwrites the
+    existing value on every call -- the whole point is tracking the most
+    recent check for rotation, not a one-time stamp. Without this, a review
+    stage would just keep re-picking the exact same "oldest eligible" post
+    forever, since nothing ever advanced past it."""
+    try:
+        col_index = _ensure_column_header(worksheet_name, check_column_name)
+        if col_index is None:
+            return
+        lookup = manage_sheet_data(worksheet_name=worksheet_name, action="find_row_by_key", key_column=key_column, key_value=key_value)
+        if not (lookup.get("status") == "success" and lookup.get("found")):
+            return
+        manage_sheet_data(worksheet_name=worksheet_name, action="update_cell", row_index=lookup["row_index"], col_index=col_index, data=_timestamp_now())
+    except Exception as e:
+        print(f"Warning: failed to stamp {check_column_name} on {worksheet_name} for '{key_value}': {e}")
+
+
+def _get_sanity_post_index() -> Dict[str, dict]:
+    """Maps post Title -> {"slug", "created_at"} using Sanity's own
+    SanityAdapter.list_posts() (real, universal _createdAt -- see that
+    method's docstring). Best-effort: an empty/partial result just means
+    age-based eligibility falls back to "unknown" (treated as eligible, not
+    blocked) for whichever titles are missing, rather than failing the
+    whole stage over a Sanity hiccup."""
+    from lib.sanity_adapter import SanityAdapter
+    try:
+        sanity = SanityAdapter(
+            project_id=os.environ["SANITY_PROJECT_ID"],
+            dataset=os.environ.get("SANITY_DATASET") or "production",
+            token=os.environ["SANITY_API_TOKEN"],
+        )
+    except Exception as e:
+        print(f"Warning: failed to init SanityAdapter for post age index: {e}")
+        return {}
+    index: Dict[str, dict] = {}
+    for doc in sanity.list_posts():
+        title = str(doc.get("title", "")).strip()
+        if not title:
+            continue
+        created_at = None
+        raw = doc.get("_createdAt")
+        if raw:
+            try:
+                created_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                created_at = None
+        index[title] = {"slug": doc.get("slug"), "created_at": created_at}
+    return index
+
+
+def _select_review_candidate(
+    rows: list, sanity_index: Dict[str, dict], check_column: str, min_age_days: Optional[int] = None,
+) -> Optional[dict]:
+    """Picks the published post most overdue for a review of the given kind,
+    rotating through the whole catalog over time via check_column instead of
+    re-picking the same post every run. Age comes from Sanity's real
+    _createdAt (sanity_index), not a sheet timestamp, so posts that predate
+    this pipeline's own tracking are still included rather than silently
+    skipped forever -- if a title isn't in sanity_index at all (age
+    unknown), it's still treated as eligible rather than excluded.
+
+    Priority: posts never reviewed before (empty check_column) first,
+    real-age-oldest first among those; then posts reviewed longest ago."""
+    now = datetime.now(timezone.utc)
+    never_checked = []
+    previously_checked = []
+    for row in rows:
+        if str(row.get("Published", "")).strip().lower() != "yes":
+            continue
+        title = str(row.get("Title", "")).strip()
+        if not title:
+            continue
+
+        sanity_info = sanity_index.get(title) or {}
+        created_at = sanity_info.get("created_at")
+        if min_age_days is not None and created_at is not None and (now - created_at).days < min_age_days:
+            continue  # known (via real Sanity age) to be too recent -- skip regardless of check history
+
+        check_raw = str(row.get(check_column, "")).strip()
+        sort_key = created_at or datetime.min.replace(tzinfo=timezone.utc)
+        if not check_raw:
+            never_checked.append((sort_key, row))
+            continue
+        try:
+            checked_at = datetime.strptime(check_raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            checked_at = datetime.min.replace(tzinfo=timezone.utc)
+        previously_checked.append((checked_at, row))
+
+    if never_checked:
+        never_checked.sort(key=lambda pair: pair[0])
+        return never_checked[0][1]
+    if previously_checked:
+        previously_checked.sort(key=lambda pair: pair[0])
+        return previously_checked[0][1]
+    return None
 
 
 def _ensure_brief_persisted(brief: dict) -> None:
@@ -918,51 +1019,60 @@ FRESHNESS_SWEEP_MIN_AGE_DAYS = 90
 
 
 async def run_freshness_sweep() -> None:
-    """Finds the oldest published post whose content hasn't been checked in
-    a while and fact-checks a few time-sensitive claims against the live
-    web -- confirmed directly necessary by this session's own research work,
-    where pricing/availability figures for AI models drifted meaningfully
-    within weeks. Detection only: does NOT auto-apply an edit. edit_post
-    only ever runs on an explicit human-specified title+instruction, and
-    every other publish-affecting action in this pipeline (draft approval,
-    topic approval, publish itself) goes through a human first -- an LLM
+    """Finds the published post most overdue for a freshness check (never
+    checked before, or checked longest ago -- see _select_review_candidate)
+    and fact-checks a few time-sensitive claims against the live web --
+    confirmed directly necessary by this session's own research work, where
+    pricing/availability figures for AI models drifted meaningfully within
+    weeks. Detection only: does NOT auto-apply an edit. edit_post only ever
+    runs on an explicit human-specified title+instruction, and every other
+    publish-affecting action in this pipeline (draft approval, topic
+    approval, publish itself) goes through a human first -- an LLM
     fact-check that's wrong would silently corrupt an already-live post if
     this auto-applied, so a finding is posted to Discord as a suggestion
     instead, for the reviewer to apply via /edit (or chat) if they agree.
 
-    Only considers posts with a "Created At" timestamp (added this session)
-    -- posts that predate that column have no reliable age signal and are
-    skipped rather than guessed at, so this naturally does nothing until
-    posts have actually accumulated real age."""
+    Age comes from Sanity's real _createdAt (via _get_sanity_post_index),
+    not a sheet timestamp -- includes posts published long before this
+    pipeline tracked anything itself, not just ones with a sheet-side
+    "Created At" stamp. Rotates through the whole catalog over multiple
+    runs via a "Last Freshness Check" column instead of re-picking the same
+    post every time."""
     records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
     if records.get("status") != "success":
         raise RuntimeError(f"Failed to read generated_posts: {records}")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=FRESHNESS_SWEEP_MIN_AGE_DAYS)
-    candidates = []
-    for row in records.get("data", []):
-        if str(row.get("Published", "")).strip().lower() != "yes":
-            continue
-        raw = str(row.get("Created At", "")).strip()
-        if not raw:
-            continue
-        try:
-            stamped = datetime.strptime(raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if stamped <= cutoff:
-            candidates.append((stamped, row))
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
 
-    if not candidates:
-        print(f"[freshness_sweep] No published posts older than {FRESHNESS_SWEEP_MIN_AGE_DAYS} days (with a Created At timestamp) to check.")
+    def _notify(text: str) -> None:
+        if not webhook_url:
+            return
+        try:
+            _post_discord_message(webhook_url, text)
+        except Exception as e:
+            print(f"Failed to send Discord freshness-sweep notification: {e}")
+
+    sanity_index = _get_sanity_post_index()
+    candidate = _select_review_candidate(
+        records.get("data", []), sanity_index, "Last Freshness Check", min_age_days=FRESHNESS_SWEEP_MIN_AGE_DAYS,
+    )
+    if candidate is None:
+        msg = f"No published posts eligible right now (needs to be {FRESHNESS_SWEEP_MIN_AGE_DAYS}+ days old)."
+        print(f"[freshness_sweep] {msg}")
+        _notify(f"🕰️ Freshness sweep: {msg}")
         return
 
-    candidates.sort(key=lambda pair: pair[0])
-    _, oldest = candidates[0]
-    title = str(oldest.get("Title", "")).strip()
-    content = str(oldest.get("Generated Content", ""))
-    if not title or not content:
-        print(f"[freshness_sweep] Oldest candidate row missing Title/Generated Content; skipping this run.")
+    title = str(candidate.get("Title", "")).strip()
+    content = str(candidate.get("Generated Content", ""))
+    # Stamp before the actual check, not after -- so a genuine crash mid-run
+    # doesn't leave this exact post stuck being re-selected forever; the
+    # next scheduled run naturally rotates to a different one instead.
+    _stamp_check_column("generated_posts", "Title", title, "Last Freshness Check")
+
+    if not content:
+        msg = f"Picked '{title}' but it has no saved content; skipped."
+        print(f"[freshness_sweep] {msg}")
+        _notify(f"🕰️ Freshness sweep: {msg}")
         return
 
     print(f"[freshness_sweep] Checking '{title}' for stale claims.")
@@ -974,25 +1084,22 @@ async def run_freshness_sweep() -> None:
     output = str(getattr(result, "final_output", result)).strip()
     parsed = _parse_agent_json(output)
     if parsed is None or _get_field(parsed, "status") != "needs_update":
-        print(f"[freshness_sweep] '{title}' looks current; no action needed.")
+        msg = f"Checked '{title}' -- looks current, no action needed."
+        print(f"[freshness_sweep] {msg}")
+        _notify(f"🕰️ Freshness sweep: {msg}")
         return
 
     suggested_edit = str(_get_field(parsed, "suggested_edit", "")).strip()
     reason = str(_get_field(parsed, "reason", "")).strip()
     print(f"[freshness_sweep] Flagged '{title}': {reason}")
 
-    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if webhook_url and suggested_edit:
-        message = (
+    if suggested_edit:
+        _notify(
             f"🕰️ **Freshness check flagged a possibly outdated post:** {title}\n"
             f"**Why:** {reason}\n"
             f"**Suggested edit:** {suggested_edit}\n\n"
             "Use `/edit` (or ask me in chat) with this title to apply it if you agree."
         )
-        try:
-            _post_discord_message(webhook_url, message)
-        except Exception as e:
-            print(f"Failed to send Discord freshness notification: {e}")
 
 
 _REPURPOSED_CONTENT_HEADERS = ["Keyword/Topic", "Title", "Post URL", "LinkedIn Post", "Reddit Summary", "Image Prompt", "Created At"]
@@ -1172,78 +1279,73 @@ SEARCH_PERFORMANCE_MIN_AGE_DAYS = 35  # needs a full 28-day GSC window post-publ
 
 
 async def run_search_performance_review() -> None:
-    """Checks the oldest published post's real Google Search Console
-    performance and flags it if the data suggests a specific, fixable
-    problem: meaningful impressions but low CTR (a title/meta description
-    that isn't earning clicks) or meaningful impressions but a poor average
-    position (a content depth/authority gap, not a snippet problem). Same
+    """Checks the published post most overdue for a performance review
+    (never checked before, or checked longest ago -- see
+    _select_review_candidate) against real Google Search Console data and
+    flags it if the data suggests a specific, fixable problem: meaningful
+    impressions but low CTR (a title/meta description that isn't earning
+    clicks) or meaningful impressions but a poor average position (a
+    content depth/authority gap, not a snippet problem). Same
     detect-and-suggest pattern as run_freshness_sweep -- never auto-applies,
     posts a suggested /edit for the reviewer to apply if they agree.
 
-    Only considers posts with a "Created At" timestamp (added this session)
-    old enough to have accumulated a real 28-day Search Console window --
-    posts without that timestamp, or too recent, are skipped rather than
-    judged on insufficient data."""
-    from lib.sanity_adapter import SanityAdapter
+    Age comes from Sanity's real _createdAt (via _get_sanity_post_index),
+    not a sheet timestamp -- includes posts published long before this
+    pipeline tracked anything itself. Rotates through the whole catalog
+    over multiple runs via a "Last Performance Check" column instead of
+    re-picking the same post every time."""
     from lib.search_console import find_striking_distance_queries, get_page_country_device_breakdown, get_page_performance
 
     records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
     if records.get("status") != "success":
         raise RuntimeError(f"Failed to read generated_posts: {records}")
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=SEARCH_PERFORMANCE_MIN_AGE_DAYS)
-    candidates = []
-    for row in records.get("data", []):
-        if str(row.get("Published", "")).strip().lower() != "yes":
-            continue
-        raw = str(row.get("Created At", "")).strip()
-        if not raw:
-            continue
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+
+    def _notify(text: str) -> None:
+        if not webhook_url:
+            return
         try:
-            stamped = datetime.strptime(raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if stamped <= cutoff:
-            candidates.append((stamped, row))
+            _post_discord_message(webhook_url, text)
+        except Exception as e:
+            print(f"Failed to send Discord search-performance notification: {e}")
 
-    if not candidates:
-        print(f"[search_performance_review] No published posts older than {SEARCH_PERFORMANCE_MIN_AGE_DAYS} days (with a Created At timestamp) to check.")
-        return
-
-    # Oldest-eligible-first each run, same ordering as run_freshness_sweep,
-    # so every eligible post eventually gets reviewed rather than the same
-    # newest one being re-checked every time.
-    candidates.sort(key=lambda pair: pair[0])
-    _, oldest = candidates[0]
-    title = str(oldest.get("Title", "")).strip()
-    if not title:
-        print("[search_performance_review] Oldest candidate row missing Title; skipping this run.")
+    sanity_index = _get_sanity_post_index()
+    candidate = _select_review_candidate(
+        records.get("data", []), sanity_index, "Last Performance Check", min_age_days=SEARCH_PERFORMANCE_MIN_AGE_DAYS,
+    )
+    if candidate is None:
+        msg = f"No published posts eligible right now (needs to be {SEARCH_PERFORMANCE_MIN_AGE_DAYS}+ days old)."
+        print(f"[search_performance_review] {msg}")
+        _notify(f"📊 Search performance review: {msg}")
         return
 
-    try:
-        sanity = SanityAdapter(
-            project_id=os.environ["SANITY_PROJECT_ID"],
-            dataset=os.environ.get("SANITY_DATASET") or "production",
-            token=os.environ["SANITY_API_TOKEN"],
-        )
-        doc = sanity.find_post_by_title(title)
-    except Exception as e:
-        print(f"[search_performance_review] Failed to resolve live URL for '{title}': {e}")
+    title = str(candidate.get("Title", "")).strip()
+    # Stamp before the actual check, not after -- so a genuine crash mid-run
+    # doesn't leave this exact post stuck being re-selected forever.
+    _stamp_check_column("generated_posts", "Title", title, "Last Performance Check")
+
+    slug = (sanity_index.get(title) or {}).get("slug")
+    if not slug:
+        msg = f"Picked '{title}' but couldn't find its live Sanity document; skipped."
+        print(f"[search_performance_review] {msg}")
+        _notify(f"📊 Search performance review: {msg}")
         return
-    if not doc or not doc.get("slug"):
-        print(f"[search_performance_review] Could not find a live Sanity document for '{title}'; skipping this run.")
-        return
-    page_url = f"https://owaisabdullah.dev/blog/{doc['slug']}"
+    page_url = f"https://owaisabdullah.dev/blog/{slug}"
 
     print(f"[search_performance_review] Checking Search Console performance for '{title}' ({page_url}).")
     perf = get_page_performance(page_url, days=28)
     if perf is None:
-        print(f"[search_performance_review] No Search Console data yet for '{title}'; nothing to flag.")
+        msg = f"No Search Console data yet for '{title}'; nothing to flag."
+        print(f"[search_performance_review] {msg}")
+        _notify(f"📊 Search performance review: {msg}")
         return
 
     impressions = perf["impressions"]
     if impressions < SEARCH_PERFORMANCE_MIN_IMPRESSIONS:
-        print(f"[search_performance_review] '{title}' has only {impressions:.0f} impressions in 28 days; not enough data to judge.")
+        msg = f"'{title}' has only {impressions:.0f} impressions in 28 days -- not enough data to judge yet."
+        print(f"[search_performance_review] {msg}")
+        _notify(f"📊 Search performance review: {msg}")
         return
 
     ctr = perf["ctr"]
@@ -1287,7 +1389,9 @@ async def run_search_performance_review() -> None:
         suggested_edit = "Strengthen this post's depth on its main topic -- add more specific examples, data, or a subtopic the current content doesn't cover yet, to better match what's ranking above it."
 
     if finding is None:
-        print(f"[search_performance_review] '{title}' looks healthy ({impressions:.0f} impressions, {ctr * 100:.1f}% CTR, position {position:.1f}); no action needed.")
+        msg = f"Checked '{title}' -- looks healthy ({impressions:.0f} impressions, {ctr * 100:.1f}% CTR, position {position:.1f}), no action needed."
+        print(f"[search_performance_review] {msg}")
+        _notify(f"📊 Search performance review: {msg}")
         return
 
     print(f"[search_performance_review] Flagged '{title}': {finding}")
@@ -1311,19 +1415,13 @@ async def run_search_performance_review() -> None:
             f"impressions, {top_device[0]} is {top_device[1] / total_impr * 100:.0f}%."
         )
 
-    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if webhook_url:
-        message = (
-            f"📊 **Search performance flagged a post:** {title}\n{page_url}\n"
-            f"**Why:** {finding}\n"
-            f"**Suggested edit:** {suggested_edit}"
-            f"{geo_note}\n\n"
-            "Use `/edit` (or ask me in chat) with this title to apply it if you agree."
-        )
-        try:
-            _post_discord_message(webhook_url, message)
-        except Exception as e:
-            print(f"Failed to send Discord search-performance notification: {e}")
+    _notify(
+        f"📊 **Search performance flagged a post:** {title}\n{page_url}\n"
+        f"**Why:** {finding}\n"
+        f"**Suggested edit:** {suggested_edit}"
+        f"{geo_note}\n\n"
+        "Use `/edit` (or ask me in chat) with this title to apply it if you agree."
+    )
 
 
 STAGE_HANDLERS = {
@@ -1351,16 +1449,17 @@ def main() -> None:
         _notify_discord_status(args.stage, success=False, detail=str(e))
         sys.exit(1)
     else:
-        # "research"/"brief"/"content"/"post"/"edit_post"/"repurpose" already
-        # get their own richer, subject-specific notifications (topic
-        # researched / brief created / draft-ready / published-with-URL /
-        # edit summary / repurposed drafts); a generic success ping on top
-        # would just be noise. "discover_topics" posts its own per-candidate
-        # messages (or nothing, if it found no candidates). "freshness_sweep"
-        # is the one exception -- it stays silent except when it flags
-        # something, so the generic ping is the only confirmation it's
-        # actually running on its weekly schedule.
-        if args.stage not in ("research", "brief", "content", "post", "edit_post", "repurpose"):
+        # Every stage now posts its own subject-specific notification on
+        # success -- including "nothing to do" outcomes for freshness_sweep/
+        # search_performance_review, which explicitly say why (e.g. "no
+        # posts old enough yet") rather than staying silent -- so the bare
+        # generic "Stage X completed" ping would only ever be redundant
+        # noise on top of that. "discover_topics" is the only one that can
+        # legitimately post nothing (no candidates found this run).
+        if args.stage not in (
+            "research", "brief", "content", "post", "edit_post", "repurpose",
+            "freshness_sweep", "search_performance_review",
+        ):
             _notify_discord_status(args.stage, success=True)
 
 

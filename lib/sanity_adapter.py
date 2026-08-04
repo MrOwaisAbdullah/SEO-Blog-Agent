@@ -749,6 +749,27 @@ class SanityAdapter:
             logger.warning(f"[SanityAdapter.find_post_by_title] Lookup failed for '{title}': {e}")
             return None
 
+    def list_posts(self) -> List[Dict[str, Any]]:
+        """Returns every post document's title, slug, and _createdAt --
+        Sanity's own system field, present automatically on every document
+        regardless of schema. This is the universal source of truth for a
+        post's real age: unlike a pipeline-side sheet "Created At" column
+        (only populated for rows created after that column was added this
+        session), _createdAt exists for every post ever published,
+        including ones from long before this pipeline tracked anything
+        itself. Used by review stages (freshness sweep, search performance
+        review) so posts that predate any sheet-side timestamp still get
+        included in rotation instead of silently excluded forever."""
+        query = '*[_type == "post"]{title, "slug": slug.current, _createdAt}'
+        query_url = self._build_query_endpoint(query)
+        try:
+            response = self._make_request("GET", query_url, data=None, max_retries=2)
+            response.raise_for_status()
+            return response.json().get("result", []) or []
+        except Exception as e:
+            logger.warning(f"[SanityAdapter.list_posts] Failed to list posts: {e}")
+            return []
+
     def update_post_content(self, doc_id: str, content_markdown: str) -> Dict[str, Any]:
         """Patches an already-published post's body `content` field in
         place, identified by its actual Sanity _id (resolve via
