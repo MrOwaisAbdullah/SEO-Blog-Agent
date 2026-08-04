@@ -117,7 +117,15 @@ MAX_KEYWORD_CELL_LENGTH = 49000
 # it requires edit_title/edit_instruction inputs that neither /run nor
 # trigger_stage_tool collect. It's only reachable via edit_post_content_tool,
 # which gathers those and dispatches the workflow directly.
-STAGE_CHOICES = ["research", "brief", "content", "post", "discover_topics"]
+#
+# freshness_sweep/repurpose/search_performance_review take no extra inputs,
+# so unlike edit_post they belong here -- confirmed live this was actually
+# missed when those three stages were added to pipeline.yml, leaving them
+# only reachable via `gh workflow run` directly, not through the bot at all.
+STAGE_CHOICES = [
+    "research", "brief", "content", "post", "discover_topics",
+    "freshness_sweep", "repurpose", "search_performance_review",
+]
 
 # Discord's gateway sends heartbeat-related traffic roughly every ~41s by
 # default, so 120s of complete silence on the socket is a strong "connection
@@ -244,10 +252,46 @@ def _get_search_console_top_queries(days: int = 28, row_limit: int = 10) -> List
     ]
 
 
+# Search Console reports country as ISO 3166-1 alpha-3 (lowercase, e.g.
+# "usa", "pak"). This maps the codes that actually show up in practice to a
+# readable name for the report -- not the full ~249-entry standard list,
+# just a broad practical set; an unmapped code falls back to showing the
+# raw uppercase code rather than failing.
+_COUNTRY_NAMES = {
+    "usa": "United States", "gbr": "United Kingdom", "can": "Canada",
+    "aus": "Australia", "nzl": "New Zealand", "irl": "Ireland",
+    "pak": "Pakistan", "ind": "India", "bgd": "Bangladesh", "lka": "Sri Lanka",
+    "npl": "Nepal", "afg": "Afghanistan",
+    "are": "United Arab Emirates", "sau": "Saudi Arabia", "qat": "Qatar",
+    "kwt": "Kuwait", "bhr": "Bahrain", "omn": "Oman", "jor": "Jordan",
+    "lbn": "Lebanon", "irq": "Iraq", "irn": "Iran", "isr": "Israel",
+    "tur": "Turkey", "egy": "Egypt", "dza": "Algeria", "mar": "Morocco",
+    "tun": "Tunisia", "lby": "Libya",
+    "deu": "Germany", "fra": "France", "esp": "Spain", "ita": "Italy",
+    "nld": "Netherlands", "bel": "Belgium", "che": "Switzerland",
+    "aut": "Austria", "swe": "Sweden", "nor": "Norway", "dnk": "Denmark",
+    "fin": "Finland", "pol": "Poland", "prt": "Portugal", "grc": "Greece",
+    "cze": "Czechia", "rou": "Romania", "hun": "Hungary", "ukr": "Ukraine",
+    "rus": "Russia",
+    "chn": "China", "jpn": "Japan", "kor": "South Korea", "twn": "Taiwan",
+    "hkg": "Hong Kong", "sgp": "Singapore", "mys": "Malaysia",
+    "idn": "Indonesia", "phl": "Philippines", "vnm": "Vietnam",
+    "tha": "Thailand", "mmr": "Myanmar", "khm": "Cambodia",
+    "bra": "Brazil", "mex": "Mexico", "arg": "Argentina", "col": "Colombia",
+    "chl": "Chile", "per": "Peru",
+    "zaf": "South Africa", "nga": "Nigeria", "ken": "Kenya", "gha": "Ghana",
+    "eth": "Ethiopia",
+}
+
+
+def _country_name(code: str) -> str:
+    return _COUNTRY_NAMES.get(code.lower(), code.upper())
+
+
 def _get_search_console_top_countries(days: int = 28, row_limit: int = 10) -> List[dict]:
     """Top countries by search traffic over a trailing window (Search
-    Console's own default row ordering). Country codes
-    are ISO 3166-1 alpha-3 (Search Console's own format, e.g. "usa")."""
+    Console's own default row ordering). Country codes are ISO 3166-1
+    alpha-3 (Search Console's own format, e.g. "usa")."""
     rows = _search_console_query(days=days, dimensions=["country"], row_limit=row_limit)
     return [
         {"country": row["keys"][0], "clicks": row.get("clicks", 0), "impressions": row.get("impressions", 0)}
@@ -310,7 +354,7 @@ def _build_seo_report() -> str:
     if top_countries:
         lines.append("\n**🌍 Top countries (28 days, by impressions):**")
         for c in top_countries:
-            lines.append(f"• {c['country'].upper()} — {c['clicks']:.0f} clicks, {c['impressions']:.0f} impressions")
+            lines.append(f"• {_country_name(c['country'])} — {c['clicks']:.0f} clicks, {c['impressions']:.0f} impressions")
     else:
         lines.append("\n🌍 No country data available yet.")
 
