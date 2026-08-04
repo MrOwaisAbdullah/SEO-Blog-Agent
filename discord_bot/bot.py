@@ -55,6 +55,7 @@ from agents import (
 )
 from discord import app_commands
 from discord.ext import commands, tasks
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.service_account import Credentials
 
 # Not using OpenAI's own API for inference (OpenRouter/DeepSeek instead), so
@@ -92,6 +93,12 @@ SHEET_SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
+# Same GOOGLE_CREDENTIALS service account as SHEET_SCOPE above, just
+# requested with a different OAuth scope for a different Google API --
+# reused deliberately rather than a second credential, per
+# docs/service_setup.md's Search Console setup section.
+SEARCH_CONSOLE_SCOPE = ["https://www.googleapis.com/auth/webmasters.readonly"]
+SEARCH_CONSOLE_SITE_URL = "https://owaisabdullah.dev/"
 SPREADSHEET_NAME = "ContentSpark"
 WORKSHEET_NAME = "generated_posts"
 # Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published
@@ -149,6 +156,48 @@ def _get_gspread_client():
 
 def _get_content_spark_worksheet(worksheet_name: str):
     return _get_gspread_client().open(SPREADSHEET_NAME).worksheet(worksheet_name)
+
+
+_search_console_creds: Optional[Credentials] = None
+
+
+def _get_search_console_totals(days: int = 7) -> Optional[dict]:
+    """Site-wide clicks/impressions/avg position over a trailing window, via
+    a raw Search Console REST call -- own small copy rather than importing
+    lib/search_console.py from the main pipeline, matching this bot's
+    established pattern (see the module docstring) of not depending on
+    pipeline-specific modules the Docker build context (discord_bot/ only)
+    can't even see. Returns None on any failure or if there's no data yet --
+    a Search Console hiccup shouldn't break the whole digest."""
+    global _search_console_creds
+    try:
+        if _search_console_creds is None:
+            creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+            _search_console_creds = Credentials.from_service_account_info(creds_info, scopes=SEARCH_CONSOLE_SCOPE)
+        if not _search_console_creds.valid:
+            _search_console_creds.refresh(GoogleAuthRequest())
+
+        end = (datetime.now(timezone.utc) - timedelta(days=3)).date()  # GSC has a ~2-3 day lag
+        start = end - timedelta(days=days)
+        response = requests.post(
+            f"https://www.googleapis.com/webmasters/v3/sites/{requests.utils.quote(SEARCH_CONSOLE_SITE_URL, safe='')}/searchAnalytics/query",
+            headers={"Authorization": f"Bearer {_search_console_creds.token}"},
+            json={"startDate": start.isoformat(), "endDate": end.isoformat(), "rowLimit": 1},
+            timeout=15,
+        )
+        response.raise_for_status()
+        rows = response.json().get("rows", [])
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "clicks": row.get("clicks", 0),
+            "impressions": row.get("impressions", 0),
+            "position": row.get("position", 0.0),
+        }
+    except Exception as e:
+        logger.warning(f"_get_search_console_totals: failed: {e}")
+        return None
 
 
 def _get_worksheet():
@@ -431,6 +480,16 @@ async def _build_weekly_digest(channel) -> str:
         lines.append(f"⚠️ Stage failures this week: **{failures}** -- check the Actions tab for details")
     else:
         lines.append("✅ No stage failures this week")
+
+    search_console = _get_search_console_totals(days=7)
+    if search_console:
+        lines.append(
+            f"🔍 Search performance: **{search_console['clicks']:.0f} clicks**, "
+            f"**{search_console['impressions']:.0f} impressions**, "
+            f"avg position **{search_console['position']:.1f}**"
+        )
+    else:
+        lines.append("🔍 Search performance: no data available this week")
 
     return "\n".join(lines)
 

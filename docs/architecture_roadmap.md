@@ -222,23 +222,23 @@ wasn't verified here (no frontend repo access). Flagged as a possible follow-up,
 | Duplicate/near-duplicate topic detection | Nothing new | Small–Medium | High | **Implemented** -- `_check_duplicate_topic` in `discord_bot/bot.py`, advisory (warns, never blocks), wired into both the topic-candidate reaction flow and `/add_topic` |
 | Weekly Discord digest | Nothing new | Small | Medium | **Implemented** -- `weekly_digest` task loop in `discord_bot/bot.py`, posts generated/briefed counts + avg quality score + stage failures over the last 7 days |
 | Content freshness sweep | `edit_post` (already built) | Medium | Medium | **Implemented** -- new `freshness_sweep` stage, weekly schedule, detect-and-suggest only (never auto-applies, posts a suggested `/edit` for the reviewer) |
-| Search-performance-driven edit loop | Search Console API (section 3) | Medium | Medium | Not started -- genuinely blocked on Search Console access |
+| Search-performance-driven edit loop | Search Console API (section 3) | Medium | Medium | **Implemented** -- access confirmed live (real click/impression data returned, see `scripts/test_search_console.py`), new `search_performance_review` stage flags high-impression/low-CTR (title/meta problem) or high-impression/low-position (content-depth problem) posts as suggested `/edit` candidates |
 | Repurposing Agent (drafts only, no auto-posting) | Nothing new | Medium–Large | Low–Medium | **Implemented** -- new `repurpose` stage, drafts LinkedIn + Reddit-style copy to a new `repurposed_content` worksheet (self-created), posts to Discord for manual copy/paste. No platform API posting, per the deferred v1 scope above |
 
 ## Priority summary
 
-| Item | Cost | Effort | Priority |
-|---|---|---|---|
-| Google Search Console API integration | Free | Small–Medium | **High** — free, closes a real blind spot, directly validates/refutes existing audit findings |
-| kie.ai as a paid image fallback below Cloudflare | ~$0.02–0.12/image, pay-as-you-go, $5 min top-up | Small | Medium–High — cheap, stable, sidesteps the free-tier-volatility risk entirely |
-| DataForSEO for topic/keyword demand scoring | Low (pay-per-call) | Medium | Medium–High — the most architecturally significant gap found, but first paid tool this pipeline would adopt |
-| Gemini Nano Banana as a second free image source | Free (pending live quota verification) | Small | Low–Medium — same resilience benefit as kie.ai, but with the same free-tier-cut risk as the text models |
-| GPT Image 2 direct (no aggregator) | Pay-per-image, no free tier | Small | Low — kie.ai reaches the same/similar models cheaper |
+| Item | Cost | Effort | Priority | Status |
+|---|---|---|---|---|
+| Google Search Console API integration | Free | Small–Medium | High | **Implemented** -- see the pipeline-feature table above; access verified live via a real query returning actual clicks/impressions |
+| kie.ai as a paid image fallback below Cloudflare | ~$0.02–0.12/image, pay-as-you-go, $5 min top-up | Small | Medium–High | Not started — cheap, stable, sidesteps the free-tier-volatility risk entirely |
+| DataForSEO for topic/keyword demand scoring | Low (pay-per-call) | Medium | Medium–High | Not started — the most architecturally significant gap found, but first paid tool this pipeline would adopt |
+| Gemini Nano Banana as a second free image source | Free (pending live quota verification) | Small | Low–Medium | Not started — same resilience benefit as kie.ai, but with the same free-tier-cut risk as the text models |
+| GPT Image 2 direct (no aggregator) | Pay-per-image, no free tier | Small | Low | Not started — kie.ai reaches the same/similar models cheaper |
 
 ## Open questions for the user before any of this gets implemented
 
-- Search Console: who has admin access to the Google Search Console property for
-  owaisabdullah.dev, to grant the service account access?
+- ~~Search Console: who has admin access...~~ Resolved -- access granted and verified live
+  (see `docs/service_setup.md` section 7, `scripts/test_search_console.py`).
 - kie.ai / DataForSEO (or any paid tool): what's an acceptable monthly budget, given every
   other service in this pipeline was deliberately chosen to be free? kie.ai's per-image cost
   is small, but it's still the first ongoing per-use cost this pipeline would take on.

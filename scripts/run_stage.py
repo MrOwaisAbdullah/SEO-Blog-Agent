@@ -1093,6 +1093,125 @@ async def run_repurpose() -> None:
     print(f"[repurpose] Drafted and saved repurposed content for '{title}'.")
 
 
+SEARCH_PERFORMANCE_MIN_IMPRESSIONS = 20
+SEARCH_PERFORMANCE_LOW_CTR = 0.01  # 1%
+SEARCH_PERFORMANCE_HIGH_POSITION = 15  # roughly "page 2 or worse"
+SEARCH_PERFORMANCE_MIN_AGE_DAYS = 35  # needs a full 28-day GSC window post-publish, plus buffer
+
+
+async def run_search_performance_review() -> None:
+    """Checks the oldest published post's real Google Search Console
+    performance and flags it if the data suggests a specific, fixable
+    problem: meaningful impressions but low CTR (a title/meta description
+    that isn't earning clicks) or meaningful impressions but a poor average
+    position (a content depth/authority gap, not a snippet problem). Same
+    detect-and-suggest pattern as run_freshness_sweep -- never auto-applies,
+    posts a suggested /edit for the reviewer to apply if they agree.
+
+    Only considers posts with a "Created At" timestamp (added this session)
+    old enough to have accumulated a real 28-day Search Console window --
+    posts without that timestamp, or too recent, are skipped rather than
+    judged on insufficient data."""
+    from lib.sanity_adapter import SanityAdapter
+    from lib.search_console import get_page_performance
+
+    records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    if records.get("status") != "success":
+        raise RuntimeError(f"Failed to read generated_posts: {records}")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SEARCH_PERFORMANCE_MIN_AGE_DAYS)
+    candidates = []
+    for row in records.get("data", []):
+        if str(row.get("Published", "")).strip().lower() != "yes":
+            continue
+        raw = str(row.get("Created At", "")).strip()
+        if not raw:
+            continue
+        try:
+            stamped = datetime.strptime(raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if stamped <= cutoff:
+            candidates.append((stamped, row))
+
+    if not candidates:
+        print(f"[search_performance_review] No published posts older than {SEARCH_PERFORMANCE_MIN_AGE_DAYS} days (with a Created At timestamp) to check.")
+        return
+
+    # Oldest-eligible-first each run, same ordering as run_freshness_sweep,
+    # so every eligible post eventually gets reviewed rather than the same
+    # newest one being re-checked every time.
+    candidates.sort(key=lambda pair: pair[0])
+    _, oldest = candidates[0]
+    title = str(oldest.get("Title", "")).strip()
+    if not title:
+        print("[search_performance_review] Oldest candidate row missing Title; skipping this run.")
+        return
+
+    try:
+        sanity = SanityAdapter(
+            project_id=os.environ["SANITY_PROJECT_ID"],
+            dataset=os.environ.get("SANITY_DATASET") or "production",
+            token=os.environ["SANITY_API_TOKEN"],
+        )
+        doc = sanity.find_post_by_title(title)
+    except Exception as e:
+        print(f"[search_performance_review] Failed to resolve live URL for '{title}': {e}")
+        return
+    if not doc or not doc.get("slug"):
+        print(f"[search_performance_review] Could not find a live Sanity document for '{title}'; skipping this run.")
+        return
+    page_url = f"https://owaisabdullah.dev/blog/{doc['slug']}"
+
+    print(f"[search_performance_review] Checking Search Console performance for '{title}' ({page_url}).")
+    perf = get_page_performance(page_url, days=28)
+    if perf is None:
+        print(f"[search_performance_review] No Search Console data yet for '{title}'; nothing to flag.")
+        return
+
+    impressions = perf["impressions"]
+    if impressions < SEARCH_PERFORMANCE_MIN_IMPRESSIONS:
+        print(f"[search_performance_review] '{title}' has only {impressions:.0f} impressions in 28 days; not enough data to judge.")
+        return
+
+    ctr = perf["ctr"]
+    position = perf["position"]
+    finding = None
+    suggested_edit = None
+    if ctr < SEARCH_PERFORMANCE_LOW_CTR:
+        finding = (
+            f"Ranking well enough to get {impressions:.0f} impressions over 28 days, but only "
+            f"{ctr * 100:.2f}% CTR ({perf['clicks']:.0f} clicks) -- the title/meta description "
+            "likely isn't compelling enough to earn the click."
+        )
+        suggested_edit = "Rewrite the title and/or meta description to be more specific and compelling -- add a concrete number, angle, or promise that stands out in search results."
+    elif position > SEARCH_PERFORMANCE_HIGH_POSITION:
+        finding = (
+            f"Getting {impressions:.0f} impressions over 28 days but only ranking at position "
+            f"{position:.1f} on average -- likely a content depth/authority gap for this query, "
+            "not a snippet problem."
+        )
+        suggested_edit = "Strengthen this post's depth on its main topic -- add more specific examples, data, or a subtopic the current content doesn't cover yet, to better match what's ranking above it."
+
+    if finding is None:
+        print(f"[search_performance_review] '{title}' looks healthy ({impressions:.0f} impressions, {ctr * 100:.1f}% CTR, position {position:.1f}); no action needed.")
+        return
+
+    print(f"[search_performance_review] Flagged '{title}': {finding}")
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if webhook_url:
+        message = (
+            f"📊 **Search performance flagged a post:** {title}\n{page_url}\n"
+            f"**Why:** {finding}\n"
+            f"**Suggested edit:** {suggested_edit}\n\n"
+            "Use `/edit` (or ask me in chat) with this title to apply it if you agree."
+        )
+        try:
+            _post_discord_message(webhook_url, message)
+        except Exception as e:
+            print(f"Failed to send Discord search-performance notification: {e}")
+
+
 STAGE_HANDLERS = {
     "research": run_research,
     "brief": run_brief,
@@ -1102,7 +1221,7 @@ STAGE_HANDLERS = {
     "edit_post": run_edit_post,
     "freshness_sweep": run_freshness_sweep,
     "repurpose": run_repurpose,
-    "freshness_sweep": run_freshness_sweep,
+    "search_performance_review": run_search_performance_review,
 }
 
 

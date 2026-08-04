@@ -225,9 +225,40 @@ a small monthly credit allowance in 2026 and had become unreliable.
    objects) — `faqs` in particular is not part of Sanity's default blog
    schema, so make sure your Studio schema actually has it or posts will
    publish with an empty FAQ section.
-6. `category` documents need a `slug` that matches `slugify(category_name)` —
-   the adapter resolves categories by slug, not by title, and silently drops
-   any category it can't resolve.
+6. `category` documents are matched (and auto-created if missing) by
+   `slug` = `slugify(category_name)` — `SanityAdapter.resolve_categories_to_refs`
+   now creates a category document on the fly the first time a given name is
+   used (deterministic `category-{slug}` id, `createIfNotExists`) instead of
+   silently dropping it, so your Studio's `category` schema needs at least a
+   `title` and `slug` field for those auto-created documents to populate
+   correctly.
+
+## 7. Google Search Console (optional -- powers search performance features)
+
+Feeds real click/impression/position data into the weekly Discord digest and
+the `search_performance_review` stage (flags posts with meaningful
+impressions but a low CTR or poor ranking as suggested `/edit` candidates).
+No new credentials needed -- reuses the same service account from section 2a
+with a different OAuth scope.
+
+1. Get the service account's email from your `GOOGLE_CREDENTIALS` JSON's
+   `client_email` field (same one already shared as Editor on both
+   spreadsheets in step 2d).
+2. Google Cloud Console → the same project the service account lives in →
+   APIs & Services → Library → **Search Console API** → Enable.
+3. [Google Search Console](https://search.google.com/search-console) →
+   select the `owaisabdullah.dev` property → Settings → Users and
+   permissions → **Add user** → paste the service account email → permission
+   level **Restricted** (read-only is all this needs; don't grant Full).
+4. The Search Console UI often shows a blank Name/Email for service-account
+   users (they don't have a Google profile) -- this is normal, not a sign the
+   grant failed. Verify it actually works with
+   `uv run python scripts/test_search_console.py` (or trigger the
+   `Test Search Console Access` GitHub Action manually) rather than trusting
+   the UI display.
+
+No new secret to set anywhere -- `GOOGLE_CREDENTIALS` already carries this
+account's key into both the pipeline and the Discord bot.
 
 ## Discord bot + GitHub Actions setup
 

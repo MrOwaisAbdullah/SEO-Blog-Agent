@@ -27,6 +27,9 @@ on:
       # often: it only ever acts on posts older than 90 days (see
       # FRESHNESS_SWEEP_MIN_AGE_DAYS in run_stage.py), so most weekly runs
       # will just find nothing eligible yet and do nothing.
+    - cron: '0 2 * * 3'  # search_performance_review -- weekly, Wednesday 7:00 AM
+      # PKT. Separate day from freshness_sweep so the two review stages
+      # don't compete for Gemini/Sanity quota on the same run.
   workflow_dispatch:
     inputs:
       stage:
@@ -42,6 +45,7 @@ on:
           - edit_post
           - freshness_sweep
           - repurpose
+          - search_performance_review
       edit_title:
         description: '(edit_post only) Title (or partial title) of the post to edit'
         required: false
@@ -86,6 +90,7 @@ jobs:
               '0 9 * * *') echo "stage=post" >> "$GITHUB_OUTPUT" ;;
               '30 9 * * *') echo "stage=repurpose" >> "$GITHUB_OUTPUT" ;;
               '0 2 * * 0') echo "stage=freshness_sweep" >> "$GITHUB_OUTPUT" ;;
+              '0 2 * * 3') echo "stage=search_performance_review" >> "$GITHUB_OUTPUT" ;;
               *)
                 echo "Unrecognized schedule: ${{ github.event.schedule }}" >&2
                 exit 1
