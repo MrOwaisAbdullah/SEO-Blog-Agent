@@ -447,6 +447,32 @@ def _resolve_latest_post_title() -> Optional[str]:
     return title or None
 
 
+def _request_post_edit(edit_instruction: str, title_reference: Optional[str] = None) -> dict:
+    """Shared by edit_post_content_tool (chat) and the /edit slash command --
+    both need the exact same title-resolution + dispatch behavior, so it
+    lives in one place rather than being duplicated. See
+    edit_post_content_tool's docstring for the full behavior description."""
+    resolved_title = (title_reference or "").strip()
+    if not resolved_title:
+        resolved_title = _resolve_latest_post_title() or ""
+        if not resolved_title:
+            return {"status": "error", "error": "No title given, and there's no post in generated_posts to default to."}
+    try:
+        already_running = dispatch_workflow(
+            "edit_post",
+            extra_inputs={"edit_title": resolved_title, "edit_instruction": edit_instruction},
+        )
+    except Exception as e:
+        logger.exception("_request_post_edit: failed to dispatch edit_post")
+        return {"status": "error", "error": str(e)}
+    return {
+        "status": "triggered",
+        "title": resolved_title,
+        "edit_instruction": edit_instruction,
+        "queued_behind_another_run": already_running,
+    }
+
+
 @function_tool
 def edit_post_content_tool(edit_instruction: str, title_reference: Optional[str] = None) -> dict:
     """Requests a targeted content edit to an EXISTING post, instead of full
@@ -474,25 +500,7 @@ def edit_post_content_tool(edit_instruction: str, title_reference: Optional[str]
     Sanity document so the site reflects the edit, not just the sheet. The
     result includes queued_behind_another_run: if true, tell the user the
     edit will run once the currently-active pipeline run finishes."""
-    resolved_title = (title_reference or "").strip()
-    if not resolved_title:
-        resolved_title = _resolve_latest_post_title() or ""
-        if not resolved_title:
-            return {"status": "error", "error": "No title given, and there's no post in generated_posts to default to."}
-    try:
-        already_running = dispatch_workflow(
-            "edit_post",
-            extra_inputs={"edit_title": resolved_title, "edit_instruction": edit_instruction},
-        )
-    except Exception as e:
-        logger.exception("edit_post_content_tool: failed to dispatch edit_post")
-        return {"status": "error", "error": str(e)}
-    return {
-        "status": "triggered",
-        "title": resolved_title,
-        "edit_instruction": edit_instruction,
-        "queued_behind_another_run": already_running,
-    }
+    return _request_post_edit(edit_instruction, title_reference)
 
 
 def _build_discord_agent() -> Optional[Agent]:
@@ -829,6 +837,23 @@ async def status_command(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ Failed to read pipeline status: {e}")
         return
     await interaction.followup.send(format_status_report(status))
+
+
+@bot.tree.command(name="edit", description="Request a specific content edit to an existing post")
+@app_commands.describe(
+    instruction="The specific change to make (e.g. \"shorten the intro\", \"fix the claim about X\")",
+    title="Post title, or partial title (leave empty to target the latest post awaiting review)",
+)
+async def edit_command(interaction: discord.Interaction, instruction: str, title: Optional[str] = None):
+    await interaction.response.defer(thinking=True)
+    result = _request_post_edit(instruction, title)
+    if result.get("status") == "error":
+        await interaction.followup.send(f"⚠️ {result.get('error')}")
+        return
+    reply = f"✏️ Requested edit to **{result['title']}**: {instruction}"
+    if result.get("queued_behind_another_run"):
+        reply += "\n(Another run is already in progress -- this will start once it finishes.)"
+    await interaction.followup.send(reply)
 
 
 async def _send_chunked(channel, text: str, limit: int = 1900) -> None:
