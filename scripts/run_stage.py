@@ -21,7 +21,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
 # the script's own directory on sys.path[0], not the repo root -- so sibling
@@ -1113,7 +1113,7 @@ async def run_search_performance_review() -> None:
     posts without that timestamp, or too recent, are skipped rather than
     judged on insufficient data."""
     from lib.sanity_adapter import SanityAdapter
-    from lib.search_console import get_page_performance
+    from lib.search_console import find_striking_distance_queries, get_page_country_device_breakdown, get_page_performance
 
     records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
     if records.get("status") != "success":
@@ -1178,7 +1178,28 @@ async def run_search_performance_review() -> None:
     position = perf["position"]
     finding = None
     suggested_edit = None
-    if ctr < SEARCH_PERFORMANCE_LOW_CTR:
+
+    # Striking-distance queries are checked FIRST and take priority over the
+    # two blunt page-level heuristics below -- "work the phrase 'X' in more
+    # prominently, it's at position 8.3 with 40 impressions/28 days" is a
+    # specific, actionable finding naming an exact keyword; "your title
+    # isn't compelling enough" is a vague guess. Only fall back to the
+    # generic heuristics when there's no specific query-level opportunity to
+    # point at.
+    striking_distance = find_striking_distance_queries(page_url, days=28)
+    if striking_distance:
+        top = striking_distance[0]
+        finding = (
+            f"The query \"{top['query']}\" already gets {top['impressions']:.0f} impressions "
+            f"over 28 days at position {top['position']:.1f} ({top['clicks']:.0f} clicks) -- "
+            "close enough to page 1 that a targeted content tweak could plausibly push it there."
+        )
+        suggested_edit = (
+            f"Work the phrase \"{top['query']}\" in more prominently -- a subheading, a direct "
+            "answer near the top of the content, or a dedicated section addressing it -- to "
+            "strengthen relevance for that specific query."
+        )
+    elif ctr < SEARCH_PERFORMANCE_LOW_CTR:
         finding = (
             f"Ranking well enough to get {impressions:.0f} impressions over 28 days, but only "
             f"{ctr * 100:.2f}% CTR ({perf['clicks']:.0f} clicks) -- the title/meta description "
@@ -1198,12 +1219,33 @@ async def run_search_performance_review() -> None:
         return
 
     print(f"[search_performance_review] Flagged '{title}': {finding}")
+
+    # Context only -- informs the reviewer's judgment (e.g. whether a
+    # region-specific example or mobile-readability pass makes sense), not
+    # itself a reason to flag or not flag anything.
+    geo_note = ""
+    breakdown = get_page_country_device_breakdown(page_url, days=28)
+    if breakdown:
+        total_impr = sum(b["impressions"] for b in breakdown) or 1
+        by_country: Dict[str, float] = {}
+        by_device: Dict[str, float] = {}
+        for b in breakdown:
+            by_country[b["country"]] = by_country.get(b["country"], 0) + b["impressions"]
+            by_device[b["device"]] = by_device.get(b["device"], 0) + b["impressions"]
+        top_country = max(by_country.items(), key=lambda kv: kv[1])
+        top_device = max(by_device.items(), key=lambda kv: kv[1])
+        geo_note = (
+            f"\n**Context:** {top_country[0].upper()} is {top_country[1] / total_impr * 100:.0f}% of "
+            f"impressions, {top_device[0]} is {top_device[1] / total_impr * 100:.0f}%."
+        )
+
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     if webhook_url:
         message = (
             f"📊 **Search performance flagged a post:** {title}\n{page_url}\n"
             f"**Why:** {finding}\n"
-            f"**Suggested edit:** {suggested_edit}\n\n"
+            f"**Suggested edit:** {suggested_edit}"
+            f"{geo_note}\n\n"
             "Use `/edit` (or ask me in chat) with this title to apply it if you agree."
         )
         try:

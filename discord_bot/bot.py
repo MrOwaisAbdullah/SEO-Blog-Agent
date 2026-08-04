@@ -1167,12 +1167,15 @@ async def _send_chunked(channel, text: str, limit: int = 1900) -> None:
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    if bot.user is None or bot.user not in message.mentions:
-        return
-
+    # No mention required -- this server only ever has the owner and the
+    # bot in it, so every non-bot message is implicitly directed at it;
+    # requiring an explicit @mention every time was just friction. Still
+    # strip a mention if one's present (harmless no-op otherwise) in case
+    # the user mentions it out of habit.
     question = message.content
-    for mention in (f"<@{bot.user.id}>", f"<@!{bot.user.id}>"):
-        question = question.replace(mention, "")
+    if bot.user is not None:
+        for mention in (f"<@{bot.user.id}>", f"<@!{bot.user.id}>"):
+            question = question.replace(mention, "")
     question = question.strip()
     if not question:
         question = "What's the current pipeline status? Give me a quick overview."

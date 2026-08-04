@@ -106,6 +106,87 @@ def get_page_performance(page_url: str, days: int = 28) -> Optional[Dict[str, fl
     }
 
 
+def get_page_queries(page_url: str, days: int = 28, row_limit: int = 25) -> List[Dict[str, Any]]:
+    """Every query bringing impressions to a single page over a trailing
+    window, sorted by impressions descending (Search Console's own default
+    row order). Each item: {"query", "clicks", "impressions", "ctr",
+    "position"}. This is what makes per-post recommendations concrete --
+    "the title isn't compelling enough" is vague, "the query 'X' gets 40
+    impressions/month at position 7 with zero clicks" is a specific,
+    actionable finding."""
+    end = date.today() - timedelta(days=3)
+    start = end - timedelta(days=days)
+    rows = query_search_analytics(
+        start_date=start,
+        end_date=end,
+        dimensions=["query"],
+        row_limit=row_limit,
+        dimension_filter_groups=[{
+            "filters": [{"dimension": "page", "operator": "equals", "expression": page_url}]
+        }],
+    )
+    return [
+        {
+            "query": row["keys"][0],
+            "clicks": row.get("clicks", 0),
+            "impressions": row.get("impressions", 0),
+            "ctr": row.get("ctr", 0.0),
+            "position": row.get("position", 0.0),
+        }
+        for row in rows
+    ]
+
+
+def find_striking_distance_queries(
+    page_url: str, days: int = 28, min_impressions: int = 5,
+    position_low: float = 5.0, position_high: float = 15.0,
+) -> List[Dict[str, Any]]:
+    """The classic cheap SEO win: queries that already have real impressions
+    and sit at position_low-position_high (page 1 bottom / page 2 top) --
+    close enough that a small, targeted content tweak (working the exact
+    phrase in more prominently, adding a section that answers it directly)
+    can plausibly push them onto page 1, unlike a query at position 40 which
+    needs a much bigger intervention. Sorted by impressions descending (the
+    queries worth targeting first)."""
+    queries = get_page_queries(page_url, days=days, row_limit=50)
+    candidates = [
+        q for q in queries
+        if q["impressions"] >= min_impressions and position_low <= q["position"] <= position_high
+    ]
+    candidates.sort(key=lambda q: q["impressions"], reverse=True)
+    return candidates
+
+
+def get_page_country_device_breakdown(page_url: str, days: int = 28, row_limit: int = 50) -> List[Dict[str, Any]]:
+    """Country + device breakdown for a single page over a trailing window.
+    Informational context for the reviewer (e.g. "78% of impressions from
+    the US, 70% mobile" might justify region-specific examples or a mobile-
+    readability check) -- not itself a trigger for flagging a post, just
+    context attached to whatever finding did trigger. Each item:
+    {"country", "device", "clicks", "impressions"}. Country codes are
+    ISO 3166-1 alpha-3 (Search Console's own format, e.g. "usa", "gbr")."""
+    end = date.today() - timedelta(days=3)
+    start = end - timedelta(days=days)
+    rows = query_search_analytics(
+        start_date=start,
+        end_date=end,
+        dimensions=["country", "device"],
+        row_limit=row_limit,
+        dimension_filter_groups=[{
+            "filters": [{"dimension": "page", "operator": "equals", "expression": page_url}]
+        }],
+    )
+    return [
+        {
+            "country": row["keys"][0],
+            "device": row["keys"][1],
+            "clicks": row.get("clicks", 0),
+            "impressions": row.get("impressions", 0),
+        }
+        for row in rows
+    ]
+
+
 def get_site_totals(days: int = 7) -> Optional[Dict[str, float]]:
     """Convenience wrapper: site-wide clicks/impressions/avg position over a
     trailing window, no dimensions -- a single summary row. Used for the
