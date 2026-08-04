@@ -36,8 +36,8 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
 import discord
 import gspread
@@ -124,6 +124,13 @@ STAGE_CHOICES = ["research", "brief", "content", "post", "discover_topics"]
 STALE_CONNECTION_SECONDS = 120
 WATCHDOG_INTERVAL_SECONDS = 30
 
+# discord.py's tasks.loop has no native "every Monday at 9am" scheduling, so
+# this is a rolling 168-hour interval from whenever the bot process last
+# started, not a fixed calendar day/time. A restart (e.g. the connection
+# watchdog above firing) resets the timer -- acceptable for a nice-to-have
+# pulse-check digest, not worth persisting state across restarts for.
+WEEKLY_DIGEST_INTERVAL_HOURS = 168
+
 _gspread_client = None
 
 
@@ -170,6 +177,64 @@ def add_keyword(content: str) -> None:
     columns get_keyword_tool (tools/sheet_tool.py) expects: Keyword, Status."""
     worksheet = _get_keywords_worksheet()
     worksheet.append_row([content, "available"])
+
+
+async def _check_duplicate_topic(candidate: str) -> Optional[str]:
+    """Compares candidate against every topic already queued, researched, or
+    published, and returns the matching existing topic text if it looks like
+    the same underlying story (not just the same general subject), or None
+    if it's sufficiently distinct or the check can't run. Nothing currently
+    stops discover_topics -- which pulls fresh Reddit/Quora trending
+    discussion every ~2 days -- from proposing essentially the same story
+    twice, wasting a full research->brief->content cycle. This is
+    deliberately advisory, never blocking: it only adds a warning to the
+    confirmation message, the human approving the topic is still the final
+    call, same as every other decision point in this bot."""
+    if not OPENROUTER_API_KEY:
+        return None
+    try:
+        existing = []
+        existing += [str(r.get("Keyword", "")).strip() for r in _get_keywords_worksheet().get_all_records()]
+        existing += [str(r.get("Keyword/Topic", "")).strip() for r in _get_content_spark_worksheet("research_data").get_all_records()]
+        existing += [str(r.get("Keyword/Topic", "")).strip() for r in _get_content_spark_worksheet("content_briefs").get_all_records()]
+        existing += [str(r.get("Title", "")).strip() for r in _get_worksheet().get_all_records()]
+        existing += [str(r.get("Keyword/Topic", "")).strip() for r in _get_content_spark_worksheet("published_posts").get_all_records()]
+        existing = [e for e in existing if e]
+    except Exception as e:
+        logger.warning(f"_check_duplicate_topic: failed to gather existing topics: {e}")
+        return None
+    if not existing:
+        return None
+    # Cap the prompt size -- these sheets grow to hundreds of rows over time,
+    # and this only needs to catch genuinely recent overlap, not every topic
+    # ever queued.
+    existing = existing[-300:]
+
+    client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+    prompt = (
+        "Candidate topic:\n" + candidate + "\n\n"
+        "Existing topics already queued, researched, or published (one per line):\n"
+        + "\n".join(f"- {t}" for t in existing) + "\n\n"
+        "Does the candidate cover essentially the SAME specific story/topic as any one of "
+        "these -- not just the same general subject area (e.g. two different posts about "
+        "\"AI agents\" broadly are NOT duplicates, but two posts about the same specific "
+        "product's same specific release ARE)? Reply with ONLY the exact matching existing "
+        "topic text if yes, or the single word NONE if no close match exists. No other text."
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0,
+        )
+        answer = (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning(f"_check_duplicate_topic: LLM check failed: {e}")
+        return None
+    if not answer or answer.strip().upper() == "NONE":
+        return None
+    return answer
 
 
 # Cap how many sample titles get pulled into a status report / chat prompt --
@@ -280,6 +345,93 @@ def format_status_report(status: dict) -> str:
         lines.append("**Awaiting review:** " + ", ".join(status["pending_review_samples"]))
     if status.get("approved_unpublished_titles"):
         lines.append("**Approved, ready to publish:** " + ", ".join(status["approved_unpublished_titles"]))
+    return "\n".join(lines)
+
+
+def _rows_created_since(worksheet_name: str, cutoff: datetime) -> List[dict]:
+    """Filters a worksheet's rows to ones stamped with a "Created At" at or
+    after cutoff (see scripts/run_stage.py::_stamp_created_at, which writes
+    that column). Rows without a parseable timestamp (predating that column,
+    or a stamp failure) are excluded rather than guessed at."""
+    try:
+        records = _get_content_spark_worksheet(worksheet_name).get_all_records()
+    except Exception as e:
+        logger.warning(f"_rows_created_since: failed to read {worksheet_name}: {e}")
+        return []
+    matched = []
+    for r in records:
+        raw = str(r.get("Created At", "")).strip()
+        if not raw:
+            continue
+        try:
+            stamped = datetime.strptime(raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if stamped >= cutoff:
+            matched.append(r)
+    return matched
+
+
+async def _count_recent_stage_failures(channel, since: datetime) -> Optional[int]:
+    """Counts "Stage X failed" notifications posted to the approval channel
+    since the given cutoff -- the only record of stage failures this bot has
+    access to (scripts/run_stage.py posts them there via
+    _notify_discord_status, but doesn't persist them anywhere queryable).
+    Returns None if the channel history can't be read, so the digest can
+    say "couldn't check" instead of implying zero failures."""
+    try:
+        count = 0
+        async for message in channel.history(after=since, limit=1000):
+            if message.author.bot and "Stage" in message.content and "failed" in message.content:
+                count += 1
+        return count
+    except Exception as e:
+        logger.warning(f"_count_recent_stage_failures: failed to read channel history: {e}")
+        return None
+
+
+async def _build_weekly_digest(channel) -> str:
+    """A weekly pulse-check summarizing what actually happened, not just
+    current totals (that's what /status is for): posts generated and their
+    average quality score, briefs written, and stage failures, all in the
+    last 7 days -- using the "Created At" column (this session's own
+    addition) rather than guessing from row position."""
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+
+    lines = ["**📅 Weekly ContentSpark Digest** (last 7 days)"]
+
+    posts_this_week = _rows_created_since("generated_posts", week_ago)
+    if posts_this_week:
+        scores = []
+        for r in posts_this_week:
+            try:
+                scores.append(float(str(r.get("Quality Score", "")).strip()))
+            except ValueError:
+                continue
+        avg_score = f"{sum(scores) / len(scores):.0f}" if scores else "?"
+        lines.append(f"✍️ Posts generated: **{len(posts_this_week)}** (avg quality score: **{avg_score}**)")
+    else:
+        lines.append("✍️ Posts generated: **0**")
+
+    briefs_this_week = _rows_created_since("content_briefs", week_ago)
+    lines.append(f"📝 Briefs written: **{len(briefs_this_week)}**")
+
+    try:
+        published_records = _get_content_spark_worksheet("published_posts").get_all_records()
+        published_total = len([r for r in published_records if not str(r.get("Error", "")).strip()])
+        lines.append(f"🌐 Total published (all time): **{published_total}**")
+    except Exception as e:
+        logger.warning(f"_build_weekly_digest: failed to read published_posts: {e}")
+
+    failures = await _count_recent_stage_failures(channel, week_ago)
+    if failures is None:
+        lines.append("⚠️ Stage failures this week: couldn't check channel history")
+    elif failures > 0:
+        lines.append(f"⚠️ Stage failures this week: **{failures}** -- check the Actions tab for details")
+    else:
+        lines.append("✅ No stage failures this week")
+
     return "\n".join(lines)
 
 
@@ -707,6 +859,7 @@ class ContentSparkBot(commands.Bot):
         await self.tree.sync()
         logger.info("Slash commands synced.")
         self.connection_watchdog.start()
+        self.weekly_digest.start()
 
     async def on_socket_event_type(self, event_type: str) -> None:
         # Fires for every gateway event, including heartbeats -- the
@@ -742,6 +895,27 @@ class ContentSparkBot(commands.Bot):
     async def _before_watchdog(self) -> None:
         await self.wait_until_ready()
 
+    @tasks.loop(hours=WEEKLY_DIGEST_INTERVAL_HOURS)
+    async def weekly_digest(self) -> None:
+        if self.weekly_digest.current_loop == 0:
+            # tasks.loop fires immediately on start(), so without this every
+            # bot restart/redeploy (Dokploy deploys, the connection watchdog
+            # restarting on a stale socket) would post an out-of-cycle
+            # digest instead of waiting a full 7 days like the name implies.
+            return
+        channel = self.get_channel(APPROVAL_CHANNEL_ID) or await self.fetch_channel(APPROVAL_CHANNEL_ID)
+        try:
+            digest = await _build_weekly_digest(channel)
+        except Exception as e:
+            logger.exception("Failed to build weekly digest")
+            digest = f"⚠️ Failed to build the weekly digest: {e}"
+        logger.info("[digest] Posting weekly digest.")
+        await channel.send(digest)
+
+    @weekly_digest.before_loop
+    async def _before_digest(self) -> None:
+        await self.wait_until_ready()
+
 
 bot = ContentSparkBot()
 
@@ -771,14 +945,18 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             logger.info(f"[reaction] Skipped topic candidate: {candidate_topic!r}")
             await channel.send(f"❌ Skipped topic candidate: **{candidate_topic}**")
             return
+        duplicate_match = await _check_duplicate_topic(candidate_topic)
         try:
             add_keyword(candidate_topic)
         except Exception as e:
             logger.exception("Failed to add topic candidate %r", candidate_topic)
             await channel.send(f"⚠️ Failed to add **{candidate_topic}** to the research queue: {e}")
             return
-        logger.info(f"[reaction] Added topic candidate to research queue: {candidate_topic!r}")
-        await channel.send(f"✅ Added **{candidate_topic}** to the research queue.")
+        logger.info(f"[reaction] Added topic candidate to research queue: {candidate_topic!r} (duplicate_match={duplicate_match!r})")
+        reply = f"✅ Added **{candidate_topic}** to the research queue."
+        if duplicate_match:
+            reply += f"\n⚠️ This looks similar to an existing topic: **{duplicate_match}** -- added anyway, but you may want to check before it gets researched."
+        await channel.send(reply)
         return
 
     title = _extract_title(message.content)
@@ -865,6 +1043,11 @@ async def add_topic_command(
     if truncated:
         content = content[:MAX_KEYWORD_CELL_LENGTH]
 
+    # Only worth checking for short topic/keyword-style submissions -- a
+    # full transcript isn't a "topic" to dedupe against titles, and running
+    # the check against tens of thousands of characters would be wasteful.
+    duplicate_match = await _check_duplicate_topic(content) if len(content) <= 300 else None
+
     try:
         add_keyword(content)
     except Exception as e:
@@ -874,6 +1057,8 @@ async def add_topic_command(
 
     preview = content[:150] + ("…" if len(content) > 150 else "")
     reply = f"✅ Added to the research queue:\n> {preview}"
+    if duplicate_match:
+        reply += f"\n⚠️ This looks similar to an existing topic: **{duplicate_match}** -- added anyway, but you may want to check before it gets researched."
     if truncated:
         reply += "\n⚠️ Content was truncated to fit Google Sheets' 50,000-character cell limit."
     logger.info(f"[/add_topic] Requested by {interaction.user}: added {len(content)} chars to ContentSpark_Keywords")

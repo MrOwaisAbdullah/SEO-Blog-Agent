@@ -75,6 +75,32 @@ def get_spreadsheet() -> gspread.Spreadsheet:
     return _spreadsheet_cache
 
 
+def ensure_worksheet_exists(worksheet_name: str, headers: List[str]) -> bool:
+    """Creates worksheet_name (with the given header row) if it doesn't
+    already exist in the spreadsheet. manage_sheet_data's own actions all
+    call spreadsheet.worksheet(worksheet_name) unconditionally before
+    dispatching on `action`, so a missing worksheet fails before any action
+    (including a hypothetical create action) could run -- this is a
+    separate, standalone function for that reason. Self-healing schema,
+    same rationale as scripts/run_stage.py's _ensure_column_header for new
+    columns: no manual Google Sheets setup step required before a new stage
+    that needs its own worksheet (e.g. repurposed_content) can run."""
+    try:
+        spreadsheet = get_spreadsheet()
+        try:
+            spreadsheet.worksheet(worksheet_name)
+            return True  # Already exists.
+        except gspread.exceptions.WorksheetNotFound:
+            pass
+        worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=100, cols=max(len(headers), 1))
+        worksheet.append_row(headers, value_input_option="USER_ENTERED")
+        logger.info(f"Created new worksheet '{worksheet_name}' with headers: {headers}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to ensure worksheet '{worksheet_name}' exists: {e}")
+        return False
+
+
 @function_tool
 def get_keyword_tool():
     """Fetches an available keyword from ContentSpark_Keywords and marks it as used."""

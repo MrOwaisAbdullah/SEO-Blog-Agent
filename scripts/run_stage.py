@@ -38,11 +38,11 @@ import requests
 from agents import set_tracing_disabled
 from agents.run import set_default_agent_runner
 
-from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent
+from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent, freshness_check_agent, repurposing_agent
 from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
-from tools.sheet_tool import manage_sheet_data
+from tools.sheet_tool import manage_sheet_data, ensure_worksheet_exists
 
 MAX_TURNS = 30
 
@@ -914,6 +914,185 @@ async def run_edit_post() -> None:
             print(f"Failed to send Discord edit notification: {e}")
 
 
+FRESHNESS_SWEEP_MIN_AGE_DAYS = 90
+
+
+async def run_freshness_sweep() -> None:
+    """Finds the oldest published post whose content hasn't been checked in
+    a while and fact-checks a few time-sensitive claims against the live
+    web -- confirmed directly necessary by this session's own research work,
+    where pricing/availability figures for AI models drifted meaningfully
+    within weeks. Detection only: does NOT auto-apply an edit. edit_post
+    only ever runs on an explicit human-specified title+instruction, and
+    every other publish-affecting action in this pipeline (draft approval,
+    topic approval, publish itself) goes through a human first -- an LLM
+    fact-check that's wrong would silently corrupt an already-live post if
+    this auto-applied, so a finding is posted to Discord as a suggestion
+    instead, for the reviewer to apply via /edit (or chat) if they agree.
+
+    Only considers posts with a "Created At" timestamp (added this session)
+    -- posts that predate that column have no reliable age signal and are
+    skipped rather than guessed at, so this naturally does nothing until
+    posts have actually accumulated real age."""
+    records = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    if records.get("status") != "success":
+        raise RuntimeError(f"Failed to read generated_posts: {records}")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=FRESHNESS_SWEEP_MIN_AGE_DAYS)
+    candidates = []
+    for row in records.get("data", []):
+        if str(row.get("Published", "")).strip().lower() != "yes":
+            continue
+        raw = str(row.get("Created At", "")).strip()
+        if not raw:
+            continue
+        try:
+            stamped = datetime.strptime(raw, _CREATED_AT_FORMAT).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if stamped <= cutoff:
+            candidates.append((stamped, row))
+
+    if not candidates:
+        print(f"[freshness_sweep] No published posts older than {FRESHNESS_SWEEP_MIN_AGE_DAYS} days (with a Created At timestamp) to check.")
+        return
+
+    candidates.sort(key=lambda pair: pair[0])
+    _, oldest = candidates[0]
+    title = str(oldest.get("Title", "")).strip()
+    content = str(oldest.get("Generated Content", ""))
+    if not title or not content:
+        print(f"[freshness_sweep] Oldest candidate row missing Title/Generated Content; skipping this run.")
+        return
+
+    print(f"[freshness_sweep] Checking '{title}' for stale claims.")
+    result = await custom_runner.run_with_fallback(
+        freshness_check_agent,
+        f"Here is a published post titled '{title}':\n\n{content}",
+        max_turns=10,
+    )
+    output = str(getattr(result, "final_output", result)).strip()
+    parsed = _parse_agent_json(output)
+    if parsed is None or _get_field(parsed, "status") != "needs_update":
+        print(f"[freshness_sweep] '{title}' looks current; no action needed.")
+        return
+
+    suggested_edit = str(_get_field(parsed, "suggested_edit", "")).strip()
+    reason = str(_get_field(parsed, "reason", "")).strip()
+    print(f"[freshness_sweep] Flagged '{title}': {reason}")
+
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if webhook_url and suggested_edit:
+        message = (
+            f"🕰️ **Freshness check flagged a possibly outdated post:** {title}\n"
+            f"**Why:** {reason}\n"
+            f"**Suggested edit:** {suggested_edit}\n\n"
+            "Use `/edit` (or ask me in chat) with this title to apply it if you agree."
+        )
+        try:
+            _post_discord_message(webhook_url, message)
+        except Exception as e:
+            print(f"Failed to send Discord freshness notification: {e}")
+
+
+_REPURPOSED_CONTENT_HEADERS = ["Keyword/Topic", "Title", "Post URL", "LinkedIn Post", "Reddit Summary", "Created At"]
+
+
+async def run_repurpose() -> None:
+    """Drafts LinkedIn/Reddit-style repurposed copy for the most recently
+    published post that hasn't been repurposed yet, and posts it to Discord
+    for the user to copy/use manually. This is the reduced v1 scope of the
+    "Publisher and Repurposer Agent" originally planned in
+    docs/overview.md/README.md but never built -- drafting only, no direct
+    platform API posting (LinkedIn/Reddit API access is a meaningfully
+    bigger scope increase, deliberately deferred). Writes to a new
+    repurposed_content worksheet (self-created if it doesn't exist yet --
+    see ensure_worksheet_exists), matching that original design's stated
+    output."""
+    if not ensure_worksheet_exists("repurposed_content", _REPURPOSED_CONTENT_HEADERS):
+        raise RuntimeError("Failed to ensure repurposed_content worksheet exists.")
+
+    published = manage_sheet_data(worksheet_name="published_posts", action="get_all_records")
+    if published.get("status") != "success":
+        raise RuntimeError(f"Failed to read published_posts: {published}")
+    successful = [r for r in published.get("data", []) if not str(r.get("Error", "")).strip()]
+    if not successful:
+        print("[repurpose] No successfully published posts found.")
+        return
+
+    repurposed = manage_sheet_data(worksheet_name="repurposed_content", action="get_all_records")
+    already_done = set()
+    if repurposed.get("status") == "success":
+        already_done = {str(r.get("Keyword/Topic", "")).strip() for r in repurposed.get("data", [])}
+
+    # published_posts rows are appended in publish order -- walk backwards
+    # so freshly-published content gets repurposed while it's still timely,
+    # not oldest backlog first.
+    candidate = None
+    for row in reversed(successful):
+        topic = str(row.get("Keyword/Topic", "")).strip()
+        if topic and topic not in already_done:
+            candidate = row
+            break
+
+    if candidate is None:
+        print("[repurpose] Every successfully published post has already been repurposed.")
+        return
+
+    topic = str(candidate.get("Keyword/Topic", "")).strip()
+    post_url = str(candidate.get("Post URL", "")).strip()
+
+    posts = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+    content = ""
+    title = topic
+    if posts.get("status") == "success":
+        for row in posts.get("data", []):
+            if str(row.get("Title", "")).strip() == topic:
+                content = str(row.get("Generated Content", ""))
+                title = str(row.get("Title", "")).strip() or topic
+                break
+
+    if not content:
+        print(f"[repurpose] Could not find Generated Content for '{topic}' in generated_posts; skipping this run.")
+        return
+
+    print(f"[repurpose] Drafting repurposed copy for '{title}'.")
+    result = await custom_runner.run_with_fallback(
+        repurposing_agent,
+        f"Title: {title}\nURL: {post_url}\n\nContent:\n{content}",
+        max_turns=8,
+    )
+    output = str(getattr(result, "final_output", result)).strip()
+    parsed = _parse_agent_json(output)
+    if parsed is None or _get_field(parsed, "status") != "success":
+        raise RuntimeError(f"Repurposing Agent failed to produce usable output: {output[:300]}")
+
+    linkedin_post = str(_get_field(parsed, "linkedin_post", "")).strip()
+    reddit_summary = str(_get_field(parsed, "reddit_summary", "")).strip()
+    if not linkedin_post or not reddit_summary:
+        raise RuntimeError(f"Repurposing Agent output missing linkedin_post/reddit_summary: {output[:300]}")
+
+    append_result = manage_sheet_data(
+        worksheet_name="repurposed_content", action="append_row",
+        row_values=[topic, title, post_url, linkedin_post, reddit_summary, _timestamp_now()],
+    )
+    if append_result.get("status") != "success":
+        print(f"[repurpose] Warning: failed to save to repurposed_content: {append_result}")
+
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if webhook_url:
+        try:
+            _post_discord_message(webhook_url, f"📢 **Repurposed content ready for:** {title}\n{post_url}\n_Drafts only -- copy/paste and post manually, no auto-posting yet._")
+            for label, body in (("LinkedIn", linkedin_post), ("Reddit", reddit_summary)):
+                chunks = _chunk_for_discord(body)
+                for i, chunk in enumerate(chunks, start=1):
+                    prefix = f"**{label} ({i}/{len(chunks)})**\n\n" if len(chunks) > 1 else f"**{label}**\n\n"
+                    _post_discord_message(webhook_url, prefix + chunk)
+        except Exception as e:
+            print(f"Failed to send Discord repurpose notification: {e}")
+    print(f"[repurpose] Drafted and saved repurposed content for '{title}'.")
+
+
 STAGE_HANDLERS = {
     "research": run_research,
     "brief": run_brief,
@@ -921,6 +1100,9 @@ STAGE_HANDLERS = {
     "post": run_post,
     "discover_topics": run_discover_topics,
     "edit_post": run_edit_post,
+    "freshness_sweep": run_freshness_sweep,
+    "repurpose": run_repurpose,
+    "freshness_sweep": run_freshness_sweep,
 }
 
 
@@ -936,13 +1118,16 @@ def main() -> None:
         _notify_discord_status(args.stage, success=False, detail=str(e))
         sys.exit(1)
     else:
-        # "research"/"brief"/"content"/"post"/"edit_post" already get their
-        # own richer, subject-specific notifications (topic researched /
-        # brief created / draft-ready / published-with-URL / edit summary);
-        # a generic success ping on top would just be noise.
-        # "discover_topics" posts its own per-candidate messages (or
-        # nothing, if it found no candidates).
-        if args.stage not in ("research", "brief", "content", "post", "edit_post"):
+        # "research"/"brief"/"content"/"post"/"edit_post"/"repurpose" already
+        # get their own richer, subject-specific notifications (topic
+        # researched / brief created / draft-ready / published-with-URL /
+        # edit summary / repurposed drafts); a generic success ping on top
+        # would just be noise. "discover_topics" posts its own per-candidate
+        # messages (or nothing, if it found no candidates). "freshness_sweep"
+        # is the one exception -- it stays silent except when it flags
+        # something, so the generic ping is the only confirmation it's
+        # actually running on its weekly schedule.
+        if args.stage not in ("research", "brief", "content", "post", "edit_post", "repurpose"):
             _notify_discord_status(args.stage, success=True)
 
 
