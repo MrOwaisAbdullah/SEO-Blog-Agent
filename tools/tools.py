@@ -376,16 +376,19 @@ def get_stock_image_tool(keyword: str):
 # 1149-1244 range depending on source/date) -- clearly ahead of the cheaper
 # FLUX.2 [klein] 4B/9B (ELO ~1030-1120) and legacy FLUX.1 [schnell] also
 # available on Workers AI's free tier. It costs more Neurons per image than
-# the klein tiers, but this only runs as a fallback (after Freepik fails)
-# for at most a handful of images/day, so the free 10,000 Neuron/day pool
-# comfortably covers it.
+# the klein tiers, but this is the primary/only AI image generator now
+# (Freepik was removed -- see the note near get_stock_image_tool below), and
+# one post's worth of images/day comfortably fits the free 10,000 Neuron/day
+# pool even at this model's higher per-image cost.
 CLOUDFLARE_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev"
 
 
 def _generate_image_cloudflare(prompt: str, keyword: str) -> Optional[Dict[str, Any]]:
-    """Free image-generation fallback via Cloudflare Workers AI (10,000 free
-    Neurons/day, no credit card) -- used when Freepik fails (e.g. an
-    invalid/expired key) instead of degrading straight to a stock photo."""
+    """Primary AI image generator via Cloudflare Workers AI (10,000 free
+    Neurons/day, no credit card required). If this fails or the credentials
+    aren't set, the caller (image_selection_agent) falls back to
+    get_stock_image_tool (Pexels) rather than this function retrying
+    internally."""
     account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
     api_token = os.environ.get("CLOUDFLARE_API_TOKEN")
     if not account_id or not api_token:
@@ -399,7 +402,7 @@ def _generate_image_cloudflare(prompt: str, keyword: str) -> Optional[Dict[str, 
         # (None, value) tuples send plain form fields without attaching a file.
         files = {
             "prompt": (None, prompt),
-            "width": (None, "1280"),  # 16:9 landscape, matching the Freepik "widescreen_16_9" framing this replaces
+            "width": (None, "1280"),  # 16:9 landscape, standard blog hero-image framing
             "height": (None, "720"),
             "steps": (None, "20"),
         }
@@ -423,7 +426,7 @@ def _generate_image_cloudflare(prompt: str, keyword: str) -> Optional[Dict[str, 
             "alt_text": f"{keyword} illustration",
             "source": "Cloudflare Workers AI (FLUX.2 dev)",
             "evaluation_score": 8.5,
-            "feedback": "Generated via Cloudflare Workers AI FLUX.2 [dev] (free-tier fallback, used because Freepik was unavailable)",
+            "feedback": "Generated via Cloudflare Workers AI FLUX.2 [dev] (primary AI image generator, genuinely free tier)",
         }
     except Exception as e:
         logger.error(f"Cloudflare Workers AI image generation failed: {e}")
