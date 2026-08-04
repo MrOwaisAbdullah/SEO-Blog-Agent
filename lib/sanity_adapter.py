@@ -750,17 +750,22 @@ class SanityAdapter:
             return None
 
     def list_posts(self) -> List[Dict[str, Any]]:
-        """Returns every post document's title, slug, and _createdAt --
-        Sanity's own system field, present automatically on every document
-        regardless of schema. This is the universal source of truth for a
-        post's real age: unlike a pipeline-side sheet "Created At" column
-        (only populated for rows created after that column was added this
-        session), _createdAt exists for every post ever published,
-        including ones from long before this pipeline tracked anything
-        itself. Used by review stages (freshness sweep, search performance
-        review) so posts that predate any sheet-side timestamp still get
-        included in rotation instead of silently excluded forever."""
-        query = '*[_type == "post"]{title, "slug": slug.current, _createdAt}'
+        """Returns every post document's title, slug, summary, and
+        _createdAt -- _createdAt is Sanity's own system field, present
+        automatically on every document regardless of schema, and the
+        universal source of truth for a post's real age: unlike a
+        pipeline-side sheet "Created At" column (only populated for rows
+        created after that column was added this session), it exists for
+        every post ever published, including ones from long before this
+        pipeline tracked anything itself. `summary` is included for the
+        same reason -- confirmed live, the repurpose recommendation list's
+        per-post angle suggestion silently produced nothing for any post
+        not tracked in the generated_posts sheet, because it was looking
+        up Summary there instead of from Sanity (every published post has
+        one; not every one has a sheet row). Used by review/repurpose
+        stages so posts that predate any sheet-side tracking still work
+        fully, not just partially."""
+        query = '*[_type == "post"]{title, "slug": slug.current, summary, _createdAt}'
         query_url = self._build_query_endpoint(query)
         try:
             response = self._make_request("GET", query_url, data=None, max_retries=2)

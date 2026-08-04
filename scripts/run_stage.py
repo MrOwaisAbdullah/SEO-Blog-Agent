@@ -379,12 +379,14 @@ def _stamp_check_column(worksheet_name: str, key_column: str, key_value: str, ch
 
 
 def _get_sanity_post_index() -> Dict[str, dict]:
-    """Maps post Title -> {"slug", "created_at"} using Sanity's own
-    SanityAdapter.list_posts() (real, universal _createdAt -- see that
-    method's docstring). Best-effort: an empty/partial result just means
-    age-based eligibility falls back to "unknown" (treated as eligible, not
-    blocked) for whichever titles are missing, rather than failing the
-    whole stage over a Sanity hiccup."""
+    """Maps post Title -> {"slug", "summary", "created_at"} using Sanity's
+    own SanityAdapter.list_posts() (real, universal for every published
+    post regardless of sheet tracking -- see that method's docstring).
+    Best-effort: an empty/partial result just means age-based eligibility
+    falls back to "unknown" (treated as eligible, not blocked) and
+    summary-dependent features (e.g. repurpose's angle suggestion) just
+    skip whichever titles are missing, rather than failing the whole stage
+    over a Sanity hiccup."""
     from lib.sanity_adapter import SanityAdapter
     try:
         sanity = SanityAdapter(
@@ -393,7 +395,7 @@ def _get_sanity_post_index() -> Dict[str, dict]:
             token=os.environ["SANITY_API_TOKEN"],
         )
     except Exception as e:
-        print(f"Warning: failed to init SanityAdapter for post age index: {e}")
+        print(f"Warning: failed to init SanityAdapter for post index: {e}")
         return {}
     index: Dict[str, dict] = {}
     for doc in sanity.list_posts():
@@ -407,7 +409,11 @@ def _get_sanity_post_index() -> Dict[str, dict]:
                 created_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             except ValueError:
                 created_at = None
-        index[title] = {"slug": doc.get("slug"), "created_at": created_at}
+        index[title] = {
+            "slug": doc.get("slug"),
+            "summary": str(doc.get("summary", "")).strip(),
+            "created_at": created_at,
+        }
     return index
 
 
@@ -1280,15 +1286,23 @@ async def run_repurpose() -> None:
 
     print(f"[repurpose] Recommending {len(candidates)} not-yet-repurposed post(s).")
 
-    # Summary lookup for the angle suggestions below -- one extra sheet read,
-    # reused for every candidate rather than one read per candidate.
-    summaries: Dict[str, str] = {}
-    posts = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
-    if posts.get("status") == "success":
-        for row in posts.get("data", []):
-            t = str(row.get("Title", "")).strip()
-            if t:
-                summaries[t] = str(row.get("Summary", "")).strip()
+    # Summary lookup for the angle suggestions below, sourced from Sanity
+    # (every published post has one) rather than the generated_posts sheet.
+    # Confirmed live: the sheet-based version silently produced NO angle for
+    # any post not tracked in generated_posts -- the exact same class of gap
+    # as _select_review_candidate_from_sanity was built to fix -- with
+    # nothing printed to explain why, since the code just quietly skipped
+    # the `if summary:` block. Falls back to the sheet only if Sanity has
+    # nothing for that title (belt-and-suspenders, not expected to matter).
+    sanity_index_for_summaries = _get_sanity_post_index()
+    summaries: Dict[str, str] = {t: info.get("summary", "") for t, info in sanity_index_for_summaries.items() if info.get("summary")}
+    if len(summaries) < len(sanity_index_for_summaries):
+        posts = manage_sheet_data(worksheet_name="generated_posts", action="get_all_records")
+        if posts.get("status") == "success":
+            for row in posts.get("data", []):
+                t = str(row.get("Title", "")).strip()
+                if t and not summaries.get(t):
+                    summaries[t] = str(row.get("Summary", "")).strip()
 
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     if webhook_url:
@@ -1302,7 +1316,9 @@ async def run_repurpose() -> None:
             # already reading the full drafted copy. A failure here just
             # means no angle line for that one candidate, not a stage failure.
             summary = summaries.get(title, "")
-            if summary:
+            if not summary:
+                print(f"[repurpose] No summary found for '{title}' (checked Sanity and the sheet); skipping its angle suggestion.")
+            else:
                 try:
                     angle_result = await custom_runner.run_with_fallback(
                         repurpose_angle_agent,
