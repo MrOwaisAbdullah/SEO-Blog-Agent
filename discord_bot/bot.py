@@ -42,7 +42,17 @@ from typing import Optional
 import discord
 import gspread
 import requests
-from agents import Agent, AsyncOpenAI, OpenAIChatCompletionsModel, Runner, function_tool, set_tracing_disabled
+from agents import (
+    Agent,
+    AgentHooks,
+    AsyncOpenAI,
+    OpenAIChatCompletionsModel,
+    RunContextWrapper,
+    Runner,
+    Tool,
+    function_tool,
+    set_tracing_disabled,
+)
 from discord import app_commands
 from discord.ext import commands, tasks
 from google.oauth2.service_account import Credentials
@@ -503,6 +513,28 @@ def edit_post_content_tool(edit_instruction: str, title_reference: Optional[str]
     return _request_post_edit(edit_instruction, title_reference)
 
 
+class _ChatAgentHooks(AgentHooks):
+    """Without this, the ContentSpark Assistant's tool calls (deciding to
+    check status, prioritize a topic, trigger a stage, request an edit) are
+    completely invisible in the logs -- confirmed live in this exact repo
+    twice already for the main pipeline's agents (image_agent.py,
+    posting_agent.py both shipped with no hooks at all). logger.info instead
+    of print() since this runs as a long-lived process, not a one-shot
+    script -- consistent with the rest of this file's logging."""
+
+    async def on_agent_start(self, context: RunContextWrapper, agent: Agent) -> None:
+        logger.info(f"[chat] Agent start: {agent.name}")
+
+    async def on_agent_end(self, context: RunContextWrapper, agent: Agent, result) -> None:
+        logger.info(f"[chat] Agent end: {agent.name}")
+
+    async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
+        logger.info(f"[chat] Tool start: {tool.name}")
+
+    async def on_tool_end(self, context: RunContextWrapper, agent: Agent, tool: Tool, result) -> None:
+        logger.info(f"[chat] Tool end: {tool.name} -> {result}")
+
+
 def _build_discord_agent() -> Optional[Agent]:
     if not OPENROUTER_API_KEY:
         return None
@@ -562,6 +594,7 @@ def _build_discord_agent() -> Optional[Agent]:
             set_post_approval_tool,
             edit_post_content_tool,
         ],
+        hooks=_ChatAgentHooks(),
         model=model,
     )
 
@@ -579,9 +612,12 @@ async def ask_discord_agent(user_message: str) -> str:
     sheet read whether it needs one or not)."""
     if _discord_agent is None:
         return "Chat isn't configured yet -- ask the admin to set OPENROUTER_API_KEY."
+    logger.info(f"[chat] Received: {user_message!r}")
     try:
         result = await Runner.run(_discord_agent, user_message, max_turns=6)
-        return str(result.final_output)
+        reply = str(result.final_output)
+        logger.info(f"[chat] Replied ({len(reply)} chars).")
+        return reply
     except Exception as e:
         logger.exception("Discord agent run failed")
         return f"⚠️ Couldn't get a response: {e}"
@@ -717,10 +753,12 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     channel = bot.get_channel(payload.channel_id) or await bot.fetch_channel(payload.channel_id)
     message = await channel.fetch_message(payload.message_id)
+    logger.info(f"[reaction] {emoji} on message {payload.message_id} in approval channel")
 
     candidate_topic = _extract_candidate_topic(message.content)
     if candidate_topic:
         if emoji == "❌":
+            logger.info(f"[reaction] Skipped topic candidate: {candidate_topic!r}")
             await channel.send(f"❌ Skipped topic candidate: **{candidate_topic}**")
             return
         try:
@@ -729,6 +767,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             logger.exception("Failed to add topic candidate %r", candidate_topic)
             await channel.send(f"⚠️ Failed to add **{candidate_topic}** to the research queue: {e}")
             return
+        logger.info(f"[reaction] Added topic candidate to research queue: {candidate_topic!r}")
         await channel.send(f"✅ Added **{candidate_topic}** to the research queue.")
         return
 
@@ -744,6 +783,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         await channel.send(f"⚠️ Failed to record {status.lower()} for **{title}**: {e}")
         return
 
+    logger.info(f"[reaction] Title {title!r} -> {status} (found={found})")
     if found:
         await channel.send(f"{'✅' if status == 'Approved' else '❌'} **{title}** marked {status.lower()}.")
     else:
@@ -755,12 +795,14 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 @app_commands.choices(stage=[app_commands.Choice(name=s, value=s) for s in STAGE_CHOICES])
 async def run_stage_command(interaction: discord.Interaction, stage: app_commands.Choice[str]):
     await interaction.response.defer(thinking=True)
+    logger.info(f"[/run] Requested by {interaction.user}: stage={stage.value}")
     try:
         already_running = dispatch_workflow(stage.value)
     except Exception as e:
         logger.exception("Failed to dispatch workflow for stage %s", stage.value)
         await interaction.followup.send(f"⚠️ Failed to trigger `{stage.value}`: {e}")
         return
+    logger.info(f"[/run] Dispatched stage={stage.value} (queued_behind_another_run={already_running})")
     if already_running:
         await interaction.followup.send(
             f"🚀 Triggered `{stage.value}` -- another run is already in progress, "
@@ -824,12 +866,14 @@ async def add_topic_command(
     reply = f"✅ Added to the research queue:\n> {preview}"
     if truncated:
         reply += "\n⚠️ Content was truncated to fit Google Sheets' 50,000-character cell limit."
+    logger.info(f"[/add_topic] Requested by {interaction.user}: added {len(content)} chars to ContentSpark_Keywords")
     await interaction.followup.send(reply)
 
 
 @bot.tree.command(name="status", description="Show how many keywords/briefs/posts are queued at each pipeline stage")
 async def status_command(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
+    logger.info(f"[/status] Requested by {interaction.user}")
     try:
         status = gather_pipeline_status()
     except Exception as e:
@@ -846,10 +890,13 @@ async def status_command(interaction: discord.Interaction):
 )
 async def edit_command(interaction: discord.Interaction, instruction: str, title: Optional[str] = None):
     await interaction.response.defer(thinking=True)
+    logger.info(f"[/edit] Requested by {interaction.user}: title={title!r} instruction={instruction!r}")
     result = _request_post_edit(instruction, title)
     if result.get("status") == "error":
+        logger.warning(f"[/edit] Failed: {result.get('error')}")
         await interaction.followup.send(f"⚠️ {result.get('error')}")
         return
+    logger.info(f"[/edit] Dispatched edit_post for {result['title']!r} (queued_behind_another_run={result.get('queued_behind_another_run')})")
     reply = f"✏️ Requested edit to **{result['title']}**: {instruction}"
     if result.get("queued_behind_another_run"):
         reply += "\n(Another run is already in progress -- this will start once it finishes.)"
