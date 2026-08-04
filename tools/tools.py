@@ -713,3 +713,35 @@ def fetch_internal_links_tool(topic: str, max_results: int = 3, exclude_slug: st
             "links": [],
             "error": f"Failed to fetch internal links: {str(e)}"
         }
+
+
+@function_tool
+def get_existing_categories_tool() -> dict:
+    """Returns the title of every category that already exists in Sanity.
+    Call this BEFORE deciding on a post's CATEGORIES, and prefer reusing an
+    existing category (matching case-insensitively or by meaning, e.g. an
+    existing "AI Agents" should be reused instead of inventing "AI Agent
+    Tools" or "AI-Powered Agents") over inventing a new, near-duplicate one.
+    Only propose a genuinely new category name if none of the existing ones
+    reasonably fit the post's topic -- a consistent, reused category set is
+    what makes categories useful as a real taxonomy instead of a different
+    ad hoc label on every single post."""
+    try:
+        adapter = SanityAdapter(
+            project_id=os.environ['SANITY_PROJECT_ID'],
+            dataset=os.environ.get('SANITY_DATASET') or "production",
+            token=os.environ['SANITY_API_TOKEN']
+        )
+        categories = adapter.list_categories()
+        return {
+            "status": "success",
+            "existing_categories": categories,
+            "message": f"Found {len(categories)} existing categories." if categories else "No categories exist yet -- this may be the first post, or category creation hasn't happened yet.",
+        }
+    except Exception as e:
+        logger.error(f"Failed to list existing categories: {e}")
+        return {
+            "status": "error",
+            "existing_categories": [],
+            "error": f"Failed to list existing categories: {str(e)}"
+        }

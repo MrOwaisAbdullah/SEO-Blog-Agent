@@ -1,7 +1,7 @@
 import logging
 import re
 from agents import Agent, ModelSettings, handoff, trace
-from tools.tools import post_to_sanity_tool, fetch_internal_links_tool, get_stock_image_tool # Ensure correct import paths
+from tools.tools import post_to_sanity_tool, fetch_internal_links_tool, get_stock_image_tool, get_existing_categories_tool # Ensure correct import paths
 from tools.sheet_tool import manage_sheet_data_tool # Ensure correct import path
 from blog_agent.image_agent import image_selection_agent, contextual_image_insertion_agent  # Import the new image agent tools
 from blog_agent.hooks import MyAgentHooks
@@ -96,7 +96,7 @@ preparation_agent = Agent(
       - `TITLE`: Use `Keyword/Topic` or derive a title.
     - `SUMMARY`: Ensure there is a 50–160 character SEO-friendly meta description. If the sheet includes a valid `Summary` (50–160 chars, contains primary keyword), use it. Otherwise, derive a concise meta description (50–160 chars) that includes the primary keyword, accurately summarizes the page, and is suitable for search result snippets.
       - `SLUG`: Create a URL-friendly slug from `Keyword/Topic` (e.g., `brand-consistency-in-social-media`).
-      - `CATEGORIES`: Derive from `Keyword/Topic` (e.g., `["Social Media", "Branding"]`).
+      - `CATEGORIES`: Call `get_existing_categories_tool` FIRST and prefer reusing an existing category name (even if the wording doesn't match your first instinct exactly -- e.g. reuse an existing "AI Agents" rather than inventing "AI Agent Tools" or "AI-Powered Agents" for the same concept) over inventing a new one. Only propose a genuinely new category if none of the existing ones reasonably fit this post's topic. Keep it to 1-3 categories derived from `Keyword/Topic` (e.g., `["Social Media", "Branding"]`). A consistent, reused category set across posts is the entire point -- a different ad hoc label on every post is equivalent to having no categories at all.
       - `CONTENT_WITH_LINKS`: Use `Generated Content`. TITLE is rendered as the page's own H1 above the content -- if `Generated Content` starts with a heading (`#`, `##`, or `###`) that repeats the title, remove that heading line before using it here so the title doesn't appear twice on the page. The content should start directly with the introduction, not a heading that restates the title.
       - `IMAGE_URL`: Use the `image_url` extracted from the `get_blog_image_tool` response (NOT a default/example URL).
       - `ALT_TEXT`: Use the `alt_text` extracted from the `get_blog_image_tool` response.
@@ -139,6 +139,7 @@ preparation_agent = Agent(
     ## Tools
     - `manage_sheet_data_tool`
     - `fetch_internal_links_tool`
+    - `get_existing_categories_tool` (call before deciding CATEGORIES -- see step 5)
     - `get_blog_image_tool` (try this first for an image)
     - `get_stock_image_tool` (guaranteed fallback if `get_blog_image_tool` fails for any reason -- see step 4)
 
@@ -147,7 +148,7 @@ preparation_agent = Agent(
     - **IMPORTANT**: Do NOT use example URLs like `https://example.com/ai-smart-glasses.jpg`.
     - **IMPORTANT**: The `IMAGE_URL` field in your output MUST contain the actual path returned by the tool.
     """,
-    tools=[manage_sheet_data_tool, fetch_internal_links_tool, get_stock_image_tool, image_selection_agent.as_tool(tool_name="get_blog_image_tool", tool_description="Selects or generates a relevant image for blog posts")],
+    tools=[manage_sheet_data_tool, fetch_internal_links_tool, get_existing_categories_tool, get_stock_image_tool, image_selection_agent.as_tool(tool_name="get_blog_image_tool", tool_description="Selects or generates a relevant image for blog posts")],
     hooks=MyAgentHooks(),
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
     model_settings=ModelSettings(temperature=0.5),

@@ -203,10 +203,46 @@ class SanityAdapter:
              return False # Indicate failure
 
 
+    def list_categories(self, max_retries: int = 2) -> List[str]:
+        """Returns the title of every existing category document. Used to
+        give the Preparation Agent (posting_agent.py, the actual place
+        CATEGORIES gets invented per-post at publish time) visibility into
+        what already exists before it names a new category, so it can reuse
+        "AI Agents" instead of independently inventing "AI Agent Tools" on
+        one run and "AI-Powered Agents" on the next -- each publish run has
+        no memory of prior runs' naming choices otherwise."""
+        query = '*[_type == "category" && defined(title)].title'
+        query_url = self._build_query_endpoint(query)
+        try:
+            response = self._make_request("GET", query_url, data=None, max_retries=max_retries)
+            response.raise_for_status()
+            result = response.json().get("result", [])
+            return sorted({str(t).strip() for t in result if str(t).strip()})
+        except Exception as e:
+            logger.warning(f"[SanityAdapter.list_categories] Failed to list categories: {e}")
+            return []
+
     def resolve_categories_to_refs(self, category_names: List[str], max_retries: int = 3) -> List[Dict[str, str]]:
         """
-        Resolves a list of category names/slugs to Sanity references.
-        Assumes category documents exist with _type 'category' and slugs matching the name (slugified).
+        Resolves a list of category names/slugs to Sanity references,
+        creating the category document if one doesn't already exist for
+        that slug.
+
+        Confirmed live: the Preparation Agent (posting_agent.py) invents a
+        fresh, freeform CATEGORIES list per post at publish time (no fixed
+        taxonomy shared across posts, and no memory of prior runs' naming
+        choices -- e.g. one post got ["AI", "Automation", "Digital FTE"] on
+        one attempt and ["AI Agents", "Automation", "Digital FTE"] on a
+        retry). Requiring the category to already exist meant almost every post's
+        categories were silently dropped the first time a given name was
+        used -- logged as a warning and skipped, never surfaced anywhere a
+        human would see it -- resulting in posts showing as
+        "Uncategorized" on the live site. Auto-creates missing categories
+        instead, using the same createIfNotExists idempotent pattern
+        already used for authors (ensure_document_exists) and posts
+        (create_document), keyed on a deterministic slug-derived _id so
+        reusing a category name across posts reuses the same document
+        rather than creating duplicates.
         """
         category_refs = []
         if not category_names:
@@ -220,32 +256,39 @@ class SanityAdapter:
         query = f'*[_type == "category" && ({slug_conditions})][0...{len(category_names)}]{{_id, slug}}'
         query_url_with_params = self._build_query_endpoint(query, slug_params)
 
+        found_slugs: Dict[str, str] = {}
         try:
-            # Use the corrected URL
             response = self._make_request("GET", query_url_with_params, data=None, max_retries=max_retries)
             response.raise_for_status()
             results = response.json().get("result", [])
-            found_slugs = {}
             for cat_doc in results:
                 if 'slug' in cat_doc and 'current' in cat_doc['slug']:
-                     found_slugs[cat_doc['slug']['current']] = cat_doc['_id']
-
-            # Match input names to found IDs
-            for name in category_names:
-                slug = slugify(name)
-                cat_id = found_slugs.get(slug)
-                if cat_id:
-                    category_refs.append({
-                        "_key": str(uuid.uuid4()),  # This is the fix
-                        "_type": "reference",
-                        "_ref": cat_id
-                    })
-                else:
-                    logger.warning(f"Category with slug '{slug}' (from name '{name}') not found in Sanity. Skipping reference.")
-            return category_refs
+                    found_slugs[cat_doc['slug']['current']] = cat_doc['_id']
         except Exception as e:
-             logger.error(f"Error resolving category references: {e}")
-             return []
+            logger.error(f"Error querying existing categories: {e}")
+            # Fall through -- still try to create/reference each category
+            # below via its deterministic _id instead of giving up entirely.
+
+        for name in category_names:
+            slug = slugify(name)
+            if not slug:
+                continue
+            cat_id = found_slugs.get(slug)
+            if not cat_id:
+                cat_id = f"category-{slug}"
+                created = self.ensure_document_exists(
+                    "category", cat_id, {"title": name, "slug": {"_type": "slug", "current": slug}}
+                )
+                if not created:
+                    logger.warning(f"Failed to create category '{name}' (slug '{slug}'); skipping reference.")
+                    continue
+                logger.info(f"Created new category document for '{name}' (slug '{slug}').")
+            category_refs.append({
+                "_key": str(uuid.uuid4()),
+                "_type": "reference",
+                "_ref": cat_id
+            })
+        return category_refs
 
 
     # Inside your SanityAdapter class

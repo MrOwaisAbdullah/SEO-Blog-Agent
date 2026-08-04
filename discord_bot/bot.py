@@ -237,6 +237,16 @@ def gather_pipeline_status() -> dict:
 
     try:
         published_records = _get_content_spark_worksheet("published_posts").get_all_records()
+        # posting_agent.py's own instructions add a row here on EVERY publish
+        # attempt, not just successful ones -- "Error: empty string if
+        # successful" implies a populated Error value on failure rather than
+        # skipping the row. Confirmed live: this sheet's row count (37) was
+        # well ahead of the live sitemap's actual post count (23), and
+        # historical duplicate-Sanity-publish attempts (see
+        # docs/fixes_and_improvements.md) would each have logged their own
+        # row too, before that was fixed. Count only rows with an empty
+        # Error column so this reflects actually-published posts.
+        published_records = [r for r in published_records if not str(r.get("Error", "")).strip()]
         status["posts_published_total"] = len(published_records)
     except Exception as e:
         logger.warning(f"gather_pipeline_status: failed to read published_posts: {e}")
