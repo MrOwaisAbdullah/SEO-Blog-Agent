@@ -161,14 +161,14 @@ def _get_content_spark_worksheet(worksheet_name: str):
 _search_console_creds: Optional[Credentials] = None
 
 
-def _get_search_console_totals(days: int = 7) -> Optional[dict]:
-    """Site-wide clicks/impressions/avg position over a trailing window, via
-    a raw Search Console REST call -- own small copy rather than importing
-    lib/search_console.py from the main pipeline, matching this bot's
-    established pattern (see the module docstring) of not depending on
-    pipeline-specific modules the Docker build context (discord_bot/ only)
-    can't even see. Returns None on any failure or if there's no data yet --
-    a Search Console hiccup shouldn't break the whole digest."""
+def _search_console_query(days: int, dimensions: Optional[List[str]] = None, row_limit: int = 1) -> List[dict]:
+    """Shared REST call underlying every Search Console query this bot
+    makes -- own small copy rather than importing lib/search_console.py
+    from the main pipeline, matching this bot's established pattern (see
+    the module docstring) of not depending on pipeline-specific modules the
+    Docker build context (discord_bot/ only) can't even see. Returns an
+    empty list on any failure -- a Search Console hiccup shouldn't break
+    the digest or a report command."""
     global _search_console_creds
     try:
         if _search_console_creds is None:
@@ -179,25 +179,152 @@ def _get_search_console_totals(days: int = 7) -> Optional[dict]:
 
         end = (datetime.now(timezone.utc) - timedelta(days=3)).date()  # GSC has a ~2-3 day lag
         start = end - timedelta(days=days)
+        body: dict = {"startDate": start.isoformat(), "endDate": end.isoformat(), "rowLimit": row_limit}
+        if dimensions:
+            body["dimensions"] = dimensions
         response = requests.post(
             f"https://www.googleapis.com/webmasters/v3/sites/{requests.utils.quote(SEARCH_CONSOLE_SITE_URL, safe='')}/searchAnalytics/query",
             headers={"Authorization": f"Bearer {_search_console_creds.token}"},
-            json={"startDate": start.isoformat(), "endDate": end.isoformat(), "rowLimit": 1},
+            json=body,
             timeout=15,
         )
         response.raise_for_status()
-        rows = response.json().get("rows", [])
-        if not rows:
-            return None
-        row = rows[0]
-        return {
+        return response.json().get("rows", [])
+    except Exception as e:
+        logger.warning(f"_search_console_query failed: {e}")
+        return []
+
+
+def _get_search_console_totals(days: int = 7) -> Optional[dict]:
+    """Site-wide clicks/impressions/avg position over a trailing window.
+    Returns None if there's no data yet."""
+    rows = _search_console_query(days=days, row_limit=1)
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "clicks": row.get("clicks", 0),
+        "impressions": row.get("impressions", 0),
+        "position": row.get("position", 0.0),
+    }
+
+
+def _get_search_console_top_pages(days: int = 28, row_limit: int = 10) -> List[dict]:
+    """Top pages by search traffic over a trailing window (Search Console's
+    own default row ordering), one row per page with its own clicks/impressions/ctr/
+    position -- no need to cross-reference generated_posts/published_posts
+    for URLs, Search Console's `page` dimension already returns exactly the
+    pages that have real performance data."""
+    rows = _search_console_query(days=days, dimensions=["page"], row_limit=row_limit)
+    return [
+        {
+            "page": row["keys"][0],
             "clicks": row.get("clicks", 0),
             "impressions": row.get("impressions", 0),
+            "ctr": row.get("ctr", 0.0),
             "position": row.get("position", 0.0),
         }
-    except Exception as e:
-        logger.warning(f"_get_search_console_totals: failed: {e}")
-        return None
+        for row in rows
+    ]
+
+
+def _get_search_console_top_queries(days: int = 28, row_limit: int = 10) -> List[dict]:
+    """Top search queries site-wide by search traffic over a trailing window
+    (Search Console's own default row ordering)."""
+    rows = _search_console_query(days=days, dimensions=["query"], row_limit=row_limit)
+    return [
+        {
+            "query": row["keys"][0],
+            "clicks": row.get("clicks", 0),
+            "impressions": row.get("impressions", 0),
+            "ctr": row.get("ctr", 0.0),
+            "position": row.get("position", 0.0),
+        }
+        for row in rows
+    ]
+
+
+def _get_search_console_top_countries(days: int = 28, row_limit: int = 10) -> List[dict]:
+    """Top countries by search traffic over a trailing window (Search
+    Console's own default row ordering). Country codes
+    are ISO 3166-1 alpha-3 (Search Console's own format, e.g. "usa")."""
+    rows = _search_console_query(days=days, dimensions=["country"], row_limit=row_limit)
+    return [
+        {"country": row["keys"][0], "clicks": row.get("clicks", 0), "impressions": row.get("impressions", 0)}
+        for row in rows
+    ]
+
+
+def _get_search_console_device_breakdown(days: int = 28) -> List[dict]:
+    """Clicks/impressions split by device type (desktop/mobile/tablet)."""
+    rows = _search_console_query(days=days, dimensions=["device"], row_limit=10)
+    return [
+        {"device": row["keys"][0], "clicks": row.get("clicks", 0), "impressions": row.get("impressions", 0)}
+        for row in rows
+    ]
+
+
+def _build_seo_report() -> str:
+    """On-demand Search Console report: site totals for two window sizes,
+    top pages, top queries, top countries, and device split. Shared by
+    /seo_report and get_seo_report_tool so the slash command and chat can't
+    drift apart."""
+    lines = ["**🔍 SEO Performance Report** (Google Search Console)"]
+
+    totals_7d = _get_search_console_totals(days=7)
+    if totals_7d:
+        lines.append(f"**Last 7 days:** {totals_7d['clicks']:.0f} clicks, {totals_7d['impressions']:.0f} impressions, avg position {totals_7d['position']:.1f}")
+    else:
+        lines.append("**Last 7 days:** no data")
+
+    totals_28d = _get_search_console_totals(days=28)
+    if totals_28d:
+        lines.append(f"**Last 28 days:** {totals_28d['clicks']:.0f} clicks, {totals_28d['impressions']:.0f} impressions, avg position {totals_28d['position']:.1f}")
+    else:
+        lines.append("**Last 28 days:** no data")
+
+    top_pages = _get_search_console_top_pages(days=28, row_limit=10)
+    if top_pages:
+        lines.append("\n**📄 Top pages (28 days, by impressions):**")
+        for p in top_pages:
+            slug = p["page"].rstrip("/").rsplit("/", 1)[-1] or "(homepage)"
+            lines.append(
+                f"• `{slug}` — {p['clicks']:.0f} clicks, {p['impressions']:.0f} impressions, "
+                f"{p['ctr'] * 100:.1f}% CTR, position {p['position']:.1f}"
+            )
+    else:
+        lines.append("\n📄 No per-page data available yet.")
+
+    top_queries = _get_search_console_top_queries(days=28, row_limit=10)
+    if top_queries:
+        lines.append("\n**🔑 Top queries (28 days, by impressions):**")
+        for q in top_queries:
+            lines.append(
+                f"• \"{q['query']}\" — {q['clicks']:.0f} clicks, {q['impressions']:.0f} impressions, "
+                f"{q['ctr'] * 100:.1f}% CTR, position {q['position']:.1f}"
+            )
+    else:
+        lines.append("\n🔑 No query data available yet.")
+
+    top_countries = _get_search_console_top_countries(days=28, row_limit=8)
+    if top_countries:
+        lines.append("\n**🌍 Top countries (28 days, by impressions):**")
+        for c in top_countries:
+            lines.append(f"• {c['country'].upper()} — {c['clicks']:.0f} clicks, {c['impressions']:.0f} impressions")
+    else:
+        lines.append("\n🌍 No country data available yet.")
+
+    devices = _get_search_console_device_breakdown(days=28)
+    if devices:
+        total_impr = sum(d["impressions"] for d in devices) or 1
+        device_parts = [f"{d['device']} {d['impressions'] / total_impr * 100:.0f}%" for d in devices]
+        lines.append(f"\n**📱 Device split (28 days):** {', '.join(device_parts)}")
+
+    lines.append(
+        "\n_For a deeper per-post breakdown (specific underperforming keywords, "
+        "suggested edits), trigger the `search_performance_review` stage._"
+    )
+    return "\n".join(lines)
 
 
 def _get_worksheet():
@@ -510,6 +637,17 @@ def get_pipeline_status_tool() -> dict:
     return gather_pipeline_status()
 
 
+@function_tool
+def get_seo_report_tool() -> str:
+    """Returns an on-demand Google Search Console performance report:
+    site-wide clicks/impressions/average position for the last 7 and 28
+    days, plus the top pages by impressions with their own clicks/CTR/
+    position. Call this whenever the user asks for an SEO report, search
+    performance, rankings, traffic, or how posts are doing in search --
+    this is real Search Console data, don't guess or make up numbers."""
+    return _build_seo_report()
+
+
 def _find_row_index(worksheet, key_column: str, needle: str) -> Optional[int]:
     """Case-insensitive substring match against key_column. Returns the
     1-based row index of the first match, or None."""
@@ -772,6 +910,9 @@ def _build_discord_agent() -> Optional[Agent]:
             "report.\n\n"
             "- Call get_pipeline_status_tool whenever a question is about counts, "
             "what's queued, or what's pending -- don't guess numbers.\n"
+            "- Call get_seo_report_tool whenever the user asks for an SEO report, "
+            "search performance, rankings, traffic, clicks, impressions, or how "
+            "posts are doing in search -- real Search Console data, never guess.\n"
             "- When the user names a specific topic and asks to prioritize it, run "
             "it now, or write/generate content for it: call prioritize_topic_tool "
             "with that topic first (it moves the matching row to the top of "
@@ -809,6 +950,7 @@ def _build_discord_agent() -> Optional[Agent]:
         ),
         tools=[
             get_pipeline_status_tool,
+            get_seo_report_tool,
             prioritize_topic_tool,
             trigger_stage_tool,
             mark_post_published_tool,
@@ -1137,6 +1279,22 @@ async def status_command(interaction: discord.Interaction):
     await interaction.followup.send(format_status_report(status))
 
 
+@bot.tree.command(name="seo_report", description="On-demand Google Search Console performance report")
+async def seo_report_command(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[/seo_report] Requested by {interaction.user}")
+    try:
+        report = _build_seo_report()
+    except Exception as e:
+        logger.exception("Failed to build SEO report")
+        await interaction.followup.send(f"⚠️ Failed to build the SEO report: {e}")
+        return
+    chunks = _chunk_text(report)
+    await interaction.followup.send(chunks[0])
+    for chunk in chunks[1:]:
+        await interaction.channel.send(chunk)
+
+
 @bot.tree.command(name="edit", description="Request a specific content edit to an existing post")
 @app_commands.describe(
     instruction="The specific change to make (e.g. \"shorten the intro\", \"fix the claim about X\")",
@@ -1157,10 +1315,17 @@ async def edit_command(interaction: discord.Interaction, instruction: str, title
     await interaction.followup.send(reply)
 
 
-async def _send_chunked(channel, text: str, limit: int = 1900) -> None:
+def _chunk_text(text: str, limit: int = 1900) -> List[str]:
+    chunks = []
     while text:
-        await channel.send(text[:limit])
+        chunks.append(text[:limit])
         text = text[limit:]
+    return chunks or [""]
+
+
+async def _send_chunked(channel, text: str, limit: int = 1900) -> None:
+    for chunk in _chunk_text(text, limit):
+        await channel.send(chunk)
 
 
 @bot.event
