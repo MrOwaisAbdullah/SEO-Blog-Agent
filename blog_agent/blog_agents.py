@@ -66,7 +66,7 @@ content_evaluation_agent = Agent(
         - Verify word count (1500–2500 words).
         - Check primary/secondary keyword usage (2–3 uses each, natural).
         - Confirm FAQs (5–7 questions in JSON, direct answers <50 words for AI Overviews).
-        - Verify 2–3 internal links (e.g., "Similar to [AI Tips](/blog/ai-tips)") and 2–3 external links (e.g., "Per [Coffee Review](https://coffeereview.com)") are naturally integrated, contextually relevant, and enhance E-E-A-T.
+        - Verify 2–3 internal links (e.g., "Similar to [our guide on AI agents](https://owaisabdullah.dev/blog/{{real-slug-from-fetch_internal_links_tool}})" -- the URL must be one `fetch_internal_links_tool` actually returned this run, never a guessed/invented slug) and 2–3 external links (e.g., "Per [Coffee Review](https://coffeereview.com)") are naturally integrated, contextually relevant, and enhance E-E-A-T. Flag ANY internal link that doesn't match a `fetch_internal_links_tool` result or uses a bare relative path instead of the full `https://owaisabdullah.dev/blog/...` URL -- that's a hallucinated/dead link, not a minor style issue.
         - Evaluate Title and Summary against the Title & Meta Description Guidance above (curiosity/hook, clear value proposition, intent match, accuracy, no AI-tell openers in Summary).
         - Score: High (0.9–1.0) if all criteria met, including natural link integration AND a Title/Summary that would genuinely earn a click; Medium (0.6–0.8) if 1-3 SEO criteria missing/forced OR the Title/Summary reads as a generic label instead of a hook; Low (<0.6) otherwise.
     - Calculate total score: `(0.4 * readability_score + 0.4 * relevance_score + 0.2 * seo_score) * 100`.
@@ -137,7 +137,7 @@ content_evaluation_agent = Agent(
     ## Introduction
     Ever wondered which coffee maker brews the perfect cup for your busy mornings? [150–200 words]
     ## Nespresso Features
-    Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, link to /blog/ai-tips]
+    Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, optionally link to a real related post using a URL fetch_internal_links_tool actually returned, e.g. https://owaisabdullah.dev/blog/{{real-slug}} -- never invent one]
     ",
     "FAQs": "[{"question": "Can a coffee maker save you time?", "answer": "Yes, models like Nespresso automate brewing. [100–150 words]"}, {"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models. [100–150 words]"}]",
     "Score": 92,
@@ -263,11 +263,12 @@ content_generator_agent = Agent(
         - Maximize structured data opportunities with bullet points and numbered lists
         - Optimize for featured snippets by including clear, concise answers to common questions  
         - Focus on direct, concise answers to user questions throughout the content
-    - **Link Integration**:  
-        - Internal links: Use descriptive anchor text (e.g., "learn more about social media automation" not "click here")  
-        - External links: Use descriptive anchor text (e.g., "according to industry research" not "source")  
+    - **Link Integration**:
+        - Internal links: Use descriptive anchor text (e.g., "learn more about social media automation" not "click here")
+        - External links: Use descriptive anchor text (e.g., "according to industry research" not "source")
         - Never use generic link text like "click here," "read more," or "link"
         - Integrate links naturally within the content, not in a separate "Related Posts" section
+        - **CRITICAL -- internal links must be real, not invented**: Every internal link MUST come from an actual entry `fetch_internal_links_tool` returned in this run (each entry's `slug` field is already the full absolute URL, e.g. `https://owaisabdullah.dev/blog/ai-agents-automations-and-agentic-ai-whats-really-different` -- use it exactly as returned). NEVER invent a plausible-sounding internal link, guess a slug, or reuse a slug/title from an earlier example in these instructions -- those are illustrative placeholders, not real posts, and linking to a URL with no matching post is a dead link on a live site. If `fetch_internal_links_tool` returns no results (or you haven't called it), write the sentence WITHOUT an internal link rather than fabricate one. Never use a bare relative path like `/blog/some-slug` -- always the full `https://owaisabdullah.dev/blog/...` URL.
 
     5. **Evaluate and Iterate:**
     - Use `get_evaluation_feedback` to evaluate content. ALWAYS include your current Title and Summary in this call, not just the body -- the evaluator scores them as the actual SERP snippet (curiosity/hook, clear value proposition, intent match, no AI-tell openers), and can't do that if they're not part of what you send it:
@@ -341,7 +342,7 @@ content_generator_agent = Agent(
     "Generated Content": "## Introduction
     Ever wondered which coffee maker brews the perfect cup for your busy mornings? [150–200 words]
     ## Nespresso Features
-    Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, link to /blog/ai-tips]
+    Why do some coffee makers brew faster? Nespresso excels, per [Coffee Review](https://coffeereview.com)... [300–500 words, optionally link to a real related post using a URL fetch_internal_links_tool actually returned, e.g. https://owaisabdullah.dev/blog/{{real-slug}} -- never invent one]
     ",
     "FAQs": "[{"question": "Can a coffee maker save you time?", "answer": "Yes, models like Nespresso automate brewing. [100–150 words]"}, {"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models. [100–150 words]"}]",
     "Quality Score": "92",
@@ -370,6 +371,7 @@ post_editor_agent = Agent(
     Rules:
     - Preserve every heading exactly as it is unless the instruction specifically asks to change a heading.
     - Preserve every internal and external link (the exact [text](url) markdown) unless the instruction specifically asks to change a link.
+    - You have no tool to look up real post URLs, so NEVER add a new internal link (a link to owaisabdullah.dev/blog/...) to this post -- you cannot verify it points to a real, existing post, and a link to a URL with no matching post is a dead link on a live site. If the instruction's new content would naturally reference another post, write the reference as plain text with no link instead. External links to other real sites are fine if the instruction calls for them.
     - Preserve the overall structure, section order, and approximate length.
     - Preserve the writing style, tone, and person (first-person "I") already present in the content.
     - Do not add a "Related Posts" section, and do not add an H1 (the title is rendered separately from this content).
