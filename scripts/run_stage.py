@@ -1032,19 +1032,27 @@ async def run_edit_post() -> None:
 
     title = str(match_row.get("Title", "")).strip()
     current_content = str(match_row.get("Generated Content", ""))
+    summary = str(match_row.get("Summary", "")).strip()
+    faqs = str(match_row.get("FAQs", "")).strip()
     if not current_content.strip():
         raise RuntimeError(f"Post '{title}' has no content to edit.")
 
     edit_result = await custom_runner.run_with_fallback(
         post_editor_agent,
         (
+            f"Title: {title}\n"
+            f"Summary: {summary}\n"
+            f"FAQs: {faqs}\n\n"
             f"Here is the current blog post content (Markdown):\n\n{current_content}\n\n"
             f"Apply ONLY this specific edit, and nothing else: {edit_instruction}\n\n"
             "Preserve everything else exactly as-is -- structure, headings, all links, tone, "
-            "and overall length. Return ONLY the complete revised Markdown content, with no "
-            "preamble, no explanation, no code fence."
+            "and overall length. Follow the same writing-quality bar and self-evaluation process "
+            "described in your instructions for whatever new/changed text you write. Return ONLY "
+            "the complete revised Markdown content, with no preamble, no explanation, no code fence."
         ),
-        max_turns=5,
+        # More tool calls now (author context, evaluation, possibly internal-link
+        # lookup, plus up to 3 evaluation rounds) than the old tools=[] version needed.
+        max_turns=12,
     )
     new_content = str(getattr(edit_result, "final_output", edit_result)).strip()
     new_content = _EDIT_CONTENT_FENCE_RE.sub("", new_content).strip()
