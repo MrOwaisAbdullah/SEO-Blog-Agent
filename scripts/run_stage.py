@@ -969,6 +969,36 @@ async def run_post() -> None:
 
 
 _EDIT_CONTENT_FENCE_RE = re.compile(r"^```(?:markdown)?\s*\n?|\n?```\s*$")
+_TITLE_NORMALIZE_RE = re.compile(r"[^a-z0-9 ]")
+
+
+def _normalize_title(title: str) -> str:
+    return _TITLE_NORMALIZE_RE.sub("", str(title).lower()).strip()
+
+
+def _find_sanity_post_fuzzy(title: str, sanity_posts: list) -> Optional[dict]:
+    """Finds the live Sanity doc matching a title we only know approximately
+    -- e.g. from generated_posts, whose Title can diverge from what actually
+    got published (the Preparation Agent can rephrase/optimize the title at
+    publish time). An exact GROQ match (find_post_by_title) silently returns
+    nothing whenever that happens; this scores every live post's title
+    against ours (substring match, else normalized similarity ratio) and
+    returns the best match above a confidence floor, same rotation/index
+    input as _get_sanity_post_index."""
+    import difflib
+
+    needle = _normalize_title(title)
+    if not needle:
+        return None
+    best, best_ratio = None, 0.0
+    for post in sanity_posts:
+        candidate = _normalize_title(post.get("title", ""))
+        if not candidate:
+            continue
+        ratio = 1.0 if (needle in candidate or candidate in needle) else difflib.SequenceMatcher(None, needle, candidate).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = post, ratio
+    return best if best_ratio >= 0.6 else None
 
 
 async def run_edit_post() -> None:
@@ -1050,17 +1080,23 @@ async def run_edit_post() -> None:
                 token=os.environ["SANITY_API_TOKEN"],
             )
             doc = sanity.find_post_by_title(title)
+            if not doc or not doc.get("_id"):
+                # Exact match missed -- fall back to fuzzy matching against
+                # every live post's title, since the sheet's Title can
+                # diverge from what actually got published (see
+                # _find_sanity_post_fuzzy docstring).
+                doc = _find_sanity_post_fuzzy(title, sanity.list_posts())
             if doc and doc.get("_id"):
                 patch_result = sanity.update_post_content(doc["_id"], new_content)
                 if patch_result.get("success"):
                     sanity_note = " Live Sanity document updated too."
-                    print(f"[edit_post] Patched live Sanity doc {doc['_id']}.")
+                    print(f"[edit_post] Patched live Sanity doc {doc['_id']} (matched title '{doc.get('title', title)}').")
                 else:
                     sanity_note = f" WARNING: sheet updated but the live Sanity patch failed: {patch_result.get('error')}"
                     print(f"[edit_post] Warning: Sanity patch failed: {patch_result.get('error')}")
             else:
                 sanity_note = " WARNING: post is marked Published but no matching live Sanity document was found by title -- the live site was NOT updated."
-                print(f"[edit_post] Warning: could not find a live Sanity doc titled '{title}'.")
+                print(f"[edit_post] Warning: could not find a live Sanity doc titled '{title}' (exact or fuzzy).")
         except Exception as e:
             sanity_note = f" WARNING: sheet updated but updating the live Sanity document failed: {e}"
             print(f"[edit_post] Warning: Sanity update raised an exception: {e}")

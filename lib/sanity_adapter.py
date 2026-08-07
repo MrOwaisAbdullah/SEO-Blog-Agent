@@ -762,10 +762,17 @@ class SanityAdapter:
         per-post angle suggestion silently produced nothing for any post
         not tracked in the generated_posts sheet, because it was looking
         up Summary there instead of from Sanity (every published post has
-        one; not every one has a sheet row). Used by review/repurpose
-        stages so posts that predate any sheet-side tracking still work
-        fully, not just partially."""
-        query = '*[_type == "post"]{title, "slug": slug.current, summary, _createdAt}'
+        one; not every one has a sheet row). Also includes `_id` so callers
+        that need to patch the doc (e.g. edit_post) don't need a second,
+        exact-title-match GROQ lookup (find_post_by_title) that silently
+        fails whenever the live title has since diverged from whatever
+        title the sheet has on file -- confirmed live, the Preparation
+        Agent's published title didn't match generated_posts' Title
+        verbatim, so exact match found nothing and the edit never reached
+        the live site. Used by review/repurpose stages so posts that
+        predate any sheet-side tracking still work fully, not just
+        partially."""
+        query = '*[_type == "post"]{_id, title, "slug": slug.current, summary, _createdAt}'
         query_url = self._build_query_endpoint(query)
         try:
             response = self._make_request("GET", query_url, data=None, max_retries=2)
