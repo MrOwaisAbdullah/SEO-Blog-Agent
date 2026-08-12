@@ -782,6 +782,122 @@ class SanityAdapter:
             logger.warning(f"[SanityAdapter.list_posts] Failed to list posts: {e}")
             return []
 
+    def _asset_ref_to_url(self, ref: str) -> Optional[str]:
+        """Builds a Sanity CDN URL from an image asset `_ref` (standard
+        format: 'image-<assetId>-<width>x<height>-<format>'), so a Portable
+        Text image block can round-trip through Markdown as a real
+        ![alt](url) the content pipeline's own markdown parser understands."""
+        try:
+            parts = ref.split("-")
+            if len(parts) < 4 or parts[0] != "image":
+                return None
+            return f"https://cdn.sanity.io/images/{self.project_id}/{self.dataset}/{parts[1]}-{parts[2]}.{parts[3]}"
+        except Exception:
+            return None
+
+    def _portable_text_to_markdown(self, blocks: List[Dict[str, Any]]) -> str:
+        """Converts Sanity Portable Text blocks back to Markdown -- the
+        reverse of _markdown_to_processed_blocks. Needed so edit_post can
+        work on posts that predate any generated_posts sheet row (the sheet
+        only has a Generated Content column for posts this pipeline itself
+        wrote; posts published before that tracking existed, or edited
+        directly in Studio, have none -- confirmed live, this silently
+        blocked editing the exact post search_performance_review flagged).
+        Doesn't need to be a lossless, general-purpose Portable Text
+        renderer -- only accurate enough that post_editor_agent sees real
+        structure to preserve; the result always goes back through the
+        already-proven markdown_to_sanity_blocks on save, so an imperfectly
+        rendered edge case degrades formatting fidelity, not data."""
+        lines: List[str] = []
+        prev_was_list_item = False
+        for block in blocks:
+            block_type = block.get("_type")
+            if block_type == "image":
+                ref = (block.get("asset") or {}).get("_ref", "")
+                url = self._asset_ref_to_url(ref) if ref else None
+                if url:
+                    if lines:
+                        lines.append("")
+                    lines.append(f"![{block.get('alt', '')}]({url})")
+                prev_was_list_item = False
+                continue
+            if block_type != "block":
+                continue
+
+            mark_defs = {md.get("_key"): md for md in (block.get("markDefs") or [])}
+            text_parts = []
+            for span in block.get("children", []):
+                text = span.get("text", "")
+                if not text:
+                    continue
+                marks = span.get("marks", []) or []
+                link_href = None
+                for mark in marks:
+                    if mark in mark_defs and mark_defs[mark].get("_type") == "link":
+                        link_href = mark_defs[mark].get("href", "")
+                if "code" in marks:
+                    text = f"`{text}`"
+                if "em" in marks:
+                    text = f"*{text}*"
+                if "strong" in marks:
+                    text = f"**{text}**"
+                if link_href:
+                    text = f"[{text}]({link_href})"
+                text_parts.append(text)
+            inline_text = "".join(text_parts)
+            if not inline_text.strip():
+                continue
+
+            style = block.get("style", "normal")
+            list_item = block.get("listItem")
+            is_list_item = bool(list_item)
+            if is_list_item:
+                level = block.get("level", 1) or 1
+                indent = "  " * (level - 1)
+                bullet = "- " if list_item == "bullet" else "1. "
+                rendered = f"{indent}{bullet}{inline_text}"
+            elif style in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                rendered = f"{'#' * int(style[1])} {inline_text}"
+            elif style == "blockquote":
+                rendered = f"> {inline_text}"
+            else:
+                rendered = inline_text
+
+            if lines and not (is_list_item and prev_was_list_item):
+                lines.append("")
+            lines.append(rendered)
+            prev_was_list_item = is_list_item
+
+        return "\n".join(lines).strip()
+
+    def get_post_content_markdown(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Fetches a live post's title/summary/content/faqs by _id and
+        renders content back to Markdown via _portable_text_to_markdown.
+        Used by edit_post as a fallback when no generated_posts sheet row
+        exists for the post (see that method's docstring)."""
+        query = '*[_id == $id][0]{title, summary, content, faqs}'
+        query_url = self._build_query_endpoint(query, {"id": doc_id})
+        try:
+            response = self._make_request("GET", query_url, data=None, max_retries=2)
+            response.raise_for_status()
+            doc = response.json().get("result")
+            if not doc:
+                return None
+            faqs = [
+                {"question": f.get("question", ""), "answer": f.get("answer", "")}
+                for f in (doc.get("faqs") or [])
+                if isinstance(f, dict)
+            ]
+            return {
+                "title": doc.get("title", ""),
+                "summary": doc.get("summary", ""),
+                "faqs": faqs,
+                "content_markdown": self._portable_text_to_markdown(doc.get("content") or []),
+            }
+        except Exception as e:
+            logger.warning(f"[SanityAdapter.get_post_content_markdown] Failed for {doc_id}: {e}")
+            return None
+
     def update_post_content(self, doc_id: str, content_markdown: str) -> Dict[str, Any]:
         """Patches an already-published post's body `content` field in
         place, identified by its actual Sanity _id (resolve via

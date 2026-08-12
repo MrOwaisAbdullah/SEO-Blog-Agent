@@ -1027,15 +1027,49 @@ async def run_edit_post() -> None:
             match_index = i
             match_row = row
             break
-    if match_row is None:
-        raise RuntimeError(f"No post matching '{title_reference}' found in generated_posts.")
 
-    title = str(match_row.get("Title", "")).strip()
-    current_content = str(match_row.get("Generated Content", ""))
-    summary = str(match_row.get("Summary", "")).strip()
-    faqs = str(match_row.get("FAQs", "")).strip()
-    if not current_content.strip():
-        raise RuntimeError(f"Post '{title}' has no content to edit.")
+    # Sanity fallback: posts published before this pipeline tracked a
+    # Generated Content column (or edited directly in Studio) have no
+    # generated_posts row at all -- confirmed live, this repeatedly blocked
+    # editing the exact post search_performance_review flagged, with a
+    # confusing "not found" error and no indication why. Sanity is the only
+    # universal source of truth for "what actually exists" (see list_posts'
+    # docstring for the same lesson learned earlier this session), so fall
+    # back to it instead of just failing.
+    sanity_fallback_doc_id = None
+    if match_row is None:
+        from lib.sanity_adapter import SanityAdapter
+        sanity = SanityAdapter(
+            project_id=os.environ["SANITY_PROJECT_ID"],
+            dataset=os.environ.get("SANITY_DATASET") or "production",
+            token=os.environ["SANITY_API_TOKEN"],
+        )
+        sanity_doc = _find_sanity_post_fuzzy(title_reference, sanity.list_posts())
+        if not sanity_doc or not sanity_doc.get("_id"):
+            raise RuntimeError(
+                f"No post matching '{title_reference}' found in generated_posts, and no live "
+                f"Sanity post matched it either. If you're sure of the title, try the exact "
+                f"published title (as shown in Sanity/Search Console), not a paraphrase."
+            )
+        full_doc = sanity.get_post_content_markdown(sanity_doc["_id"])
+        if not full_doc or not full_doc.get("content_markdown", "").strip():
+            raise RuntimeError(
+                f"Found live Sanity post '{sanity_doc.get('title')}' but couldn't read its "
+                f"content back out to edit it (empty or unparseable)."
+            )
+        sanity_fallback_doc_id = sanity_doc["_id"]
+        title = full_doc["title"]
+        current_content = full_doc["content_markdown"]
+        summary = full_doc.get("summary", "")
+        faqs = json.dumps(full_doc.get("faqs", []))
+        print(f"[edit_post] No generated_posts row for '{title_reference}' -- editing live Sanity doc {sanity_fallback_doc_id} directly instead.")
+    else:
+        title = str(match_row.get("Title", "")).strip()
+        current_content = str(match_row.get("Generated Content", ""))
+        summary = str(match_row.get("Summary", "")).strip()
+        faqs = str(match_row.get("FAQs", "")).strip()
+        if not current_content.strip():
+            raise RuntimeError(f"Post '{title}' has no content to edit.")
 
     edit_result = await custom_runner.run_with_fallback(
         post_editor_agent,
@@ -1065,21 +1099,25 @@ async def run_edit_post() -> None:
             f"corrupting '{title}'. Raw: {new_content[:300]}"
         )
 
-    headers_result = manage_sheet_data(worksheet_name="generated_posts", action="get_range", cell_range="1:1")
-    header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else _GENERATED_POSTS_FIELDS
-    if "Generated Content" not in header_row:
-        raise RuntimeError("'Generated Content' column not found in generated_posts headers.")
-    update_result = manage_sheet_data(
-        worksheet_name="generated_posts", action="update_cell",
-        row_index=match_index, col_index=header_row.index("Generated Content") + 1,
-        data=new_content,
-    )
-    if update_result.get("status") != "success":
-        raise RuntimeError(f"Failed to save edited content to generated_posts: {update_result}")
-    print(f"[edit_post] Updated Generated Content for '{title}' in generated_posts (row {match_index}).")
+    if sanity_fallback_doc_id is None:
+        headers_result = manage_sheet_data(worksheet_name="generated_posts", action="get_range", cell_range="1:1")
+        header_row = (headers_result.get("data") or [[]])[0] if headers_result.get("status") == "success" else _GENERATED_POSTS_FIELDS
+        if "Generated Content" not in header_row:
+            raise RuntimeError("'Generated Content' column not found in generated_posts headers.")
+        update_result = manage_sheet_data(
+            worksheet_name="generated_posts", action="update_cell",
+            row_index=match_index, col_index=header_row.index("Generated Content") + 1,
+            data=new_content,
+        )
+        if update_result.get("status") != "success":
+            raise RuntimeError(f"Failed to save edited content to generated_posts: {update_result}")
+        print(f"[edit_post] Updated Generated Content for '{title}' in generated_posts (row {match_index}).")
 
     sanity_note = ""
-    if str(match_row.get("Published", "")).strip().lower() == "yes":
+    # sanity_fallback_doc_id means we read this post FROM Sanity in the
+    # first place -- it's definitionally published, so always patch it back,
+    # same as the sheet path does when Published == "Yes".
+    if sanity_fallback_doc_id or str((match_row or {}).get("Published", "")).strip().lower() == "yes":
         from lib.sanity_adapter import SanityAdapter
         try:
             sanity = SanityAdapter(
@@ -1087,26 +1125,29 @@ async def run_edit_post() -> None:
                 dataset=os.environ.get("SANITY_DATASET") or "production",
                 token=os.environ["SANITY_API_TOKEN"],
             )
-            doc = sanity.find_post_by_title(title)
-            if not doc or not doc.get("_id"):
-                # Exact match missed -- fall back to fuzzy matching against
-                # every live post's title, since the sheet's Title can
-                # diverge from what actually got published (see
-                # _find_sanity_post_fuzzy docstring).
-                doc = _find_sanity_post_fuzzy(title, sanity.list_posts())
+            if sanity_fallback_doc_id:
+                doc = {"_id": sanity_fallback_doc_id, "title": title}
+            else:
+                doc = sanity.find_post_by_title(title)
+                if not doc or not doc.get("_id"):
+                    # Exact match missed -- fall back to fuzzy matching against
+                    # every live post's title, since the sheet's Title can
+                    # diverge from what actually got published (see
+                    # _find_sanity_post_fuzzy docstring).
+                    doc = _find_sanity_post_fuzzy(title, sanity.list_posts())
             if doc and doc.get("_id"):
                 patch_result = sanity.update_post_content(doc["_id"], new_content)
                 if patch_result.get("success"):
                     sanity_note = " Live Sanity document updated too."
                     print(f"[edit_post] Patched live Sanity doc {doc['_id']} (matched title '{doc.get('title', title)}').")
                 else:
-                    sanity_note = f" WARNING: sheet updated but the live Sanity patch failed: {patch_result.get('error')}"
+                    sanity_note = f" WARNING: the live Sanity patch failed: {patch_result.get('error')}"
                     print(f"[edit_post] Warning: Sanity patch failed: {patch_result.get('error')}")
             else:
                 sanity_note = " WARNING: post is marked Published but no matching live Sanity document was found by title -- the live site was NOT updated."
                 print(f"[edit_post] Warning: could not find a live Sanity doc titled '{title}' (exact or fuzzy).")
         except Exception as e:
-            sanity_note = f" WARNING: sheet updated but updating the live Sanity document failed: {e}"
+            sanity_note = f" WARNING: updating the live Sanity document failed: {e}"
             print(f"[edit_post] Warning: Sanity update raised an exception: {e}")
 
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")

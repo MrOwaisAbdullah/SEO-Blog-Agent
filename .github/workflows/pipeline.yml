@@ -19,10 +19,13 @@ on:
     - cron: '0 5 * * *'  # brief    -- 10:00 AM PKT
     - cron: '0 7 * * *'  # content  -- 12:00 PM PKT
     - cron: '0 9 * * *'  # post     -- 2:00 PM PKT
-    - cron: '30 9 * * *'  # repurpose -- 2:30 PM PKT, 30 min after post so there's
-      # something fresh to repurpose. Harmless no-op if post didn't
-      # actually publish anything new that day (walks published_posts
-      # for the newest not-yet-repurposed row, whichever day it's from).
+      # repurpose has NO cron entry, deliberately -- it used to run daily
+      # and re-post the full recommendation list unprompted, which is
+      # exactly the "auto" behavior explicitly rejected in favor of
+      # "I decide what to repurpose" (see run_repurpose's recommend-only
+      # design). It's still fully reachable on demand: ask the Discord
+      # chat agent what's worth repurposing (trigger_stage_tool), or
+      # `gh workflow run pipeline.yml -f stage=repurpose`.
     - cron: '0 2 * * 0'  # freshness_sweep -- weekly, Sunday 7:00 AM PKT. Cheap to run
       # often: it only ever acts on posts older than 90 days (see
       # FRESHNESS_SWEEP_MIN_AGE_DAYS in run_stage.py), so most weekly runs
@@ -92,7 +95,6 @@ jobs:
               '0 5 * * *') echo "stage=brief" >> "$GITHUB_OUTPUT" ;;
               '0 7 * * *') echo "stage=content" >> "$GITHUB_OUTPUT" ;;
               '0 9 * * *') echo "stage=post" >> "$GITHUB_OUTPUT" ;;
-              '30 9 * * *') echo "stage=repurpose" >> "$GITHUB_OUTPUT" ;;
               '0 2 * * 0') echo "stage=freshness_sweep" >> "$GITHUB_OUTPUT" ;;
               '0 2 * * 3') echo "stage=search_performance_review" >> "$GITHUB_OUTPUT" ;;
               *)
