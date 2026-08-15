@@ -32,6 +32,7 @@ single stateless completion call; the SDK dependency was worth taking on
 for that, but the bot still authors its own small tool set rather than
 importing the pipeline's.
 """
+import asyncio
 import json
 import logging
 import os
@@ -391,12 +392,45 @@ def set_approval(title: str, status: str) -> bool:
     return False
 
 
-def add_keyword(content: str) -> None:
+async def _run_with_sheets_retry(fn, *, max_retries: int = 4, base_delay: float = 20.0, what: str = "Sheets operation"):
+    """Runs a synchronous gspread call, retrying gspread.exceptions.APIError
+    (429s in particular) with exponential backoff on an internal timer.
+    Confirmed live: approving several topic candidates in quick succession
+    (a burst of ✅ reactions seconds apart) blew through the Sheets API's
+    per-minute read/write quota, and every unguarded gspread call after
+    that point failed immediately -- permanently losing the topic candidate
+    instead of waiting the ~60s a per-minute quota window needs to clear.
+    20s/40s/80s/160s backoff comfortably clears a per-minute quota within a
+    couple of attempts without hammering it again right away. Uses
+    asyncio.sleep, not time.sleep -- this runs inside the bot's async event
+    loop, and a blocking sleep would freeze all other Discord processing
+    (heartbeats, other commands) for the whole retry window."""
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as e:
+            last_error = e
+            if attempt == max_retries - 1:
+                break
+            delay = base_delay * (2 ** attempt)
+            logger.warning(f"{what} hit a Sheets API error (attempt {attempt + 1}/{max_retries}), retrying in {delay:.0f}s: {e}")
+            await asyncio.sleep(delay)
+    raise last_error
+
+
+async def add_keyword(content: str) -> None:
     """Appends a new row to ContentSpark_Keywords with Status=available, so
     the Triage Agent picks it up on the next research run. Matches the
-    columns get_keyword_tool (tools/sheet_tool.py) expects: Keyword, Status."""
-    worksheet = _get_keywords_worksheet()
-    worksheet.append_row([content, "available"])
+    columns get_keyword_tool (tools/sheet_tool.py) expects: Keyword, Status.
+    Retries on Sheets API rate limits (see _run_with_sheets_retry) instead
+    of silently losing the topic candidate -- this is the one call in the
+    topic-approval path where a failure means real, unrecoverable data
+    loss (the candidate is gone, not just an optional check skipped)."""
+    await _run_with_sheets_retry(
+        lambda: _get_keywords_worksheet().append_row([content, "available"]),
+        what=f"add_keyword({content[:60]!r})",
+    )
 
 
 async def _check_duplicate_topic(candidate: str) -> Optional[str]:
@@ -1236,7 +1270,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             return
         duplicate_match = await _check_duplicate_topic(candidate_topic)
         try:
-            add_keyword(candidate_topic)
+            await add_keyword(candidate_topic)
         except Exception as e:
             logger.exception("Failed to add topic candidate %r", candidate_topic)
             await channel.send(f"⚠️ Failed to add **{candidate_topic}** to the research queue: {e}")
@@ -1338,7 +1372,7 @@ async def add_topic_command(
     duplicate_match = await _check_duplicate_topic(content) if len(content) <= 300 else None
 
     try:
-        add_keyword(content)
+        await add_keyword(content)
     except Exception as e:
         logger.exception("Failed to add topic to ContentSpark_Keywords")
         await interaction.followup.send(f"⚠️ Failed to add to the research queue: {e}")
