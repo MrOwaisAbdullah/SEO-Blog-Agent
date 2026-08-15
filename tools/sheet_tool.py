@@ -101,10 +101,45 @@ def ensure_worksheet_exists(worksheet_name: str, headers: List[str]) -> bool:
         return False
 
 
+# In-process record of the keyword row get_keyword_tool claimed most recently
+# (row_index + exact keyword text). Confirmed live: marking the row "used" the
+# moment it's selected is NOT safe against the fallback runner's behavior --
+# gemini-flash-latest ran the tool (row marked used), then the model call
+# itself 503'd, and run_with_fallback re-ran the whole Triage Agent from
+# scratch. The re-run invoked the tool again, found nothing "available"
+# (the claim had already been burned), and returned an error -- the keyword
+# the user had just prioritized was lost with no research done. With this
+# state, a re-invocation in the same process re-issues the SAME row instead
+# of scanning past it; the workflow that owns the process then either clears
+# the state on success (row legitimately stays "used") or releases the row
+# back to "available" on failure via release_keyword_claim().
+_keyword_claim: Dict[str, Any] = {"row_index": None, "keyword": None}
+
+
+def _keyword_preview(keyword: str, limit: int = 80) -> str:
+    """Truncates a keyword for debug printing. Keywords can be entire YouTube
+    transcripts (10k+ chars pasted into the sheet), and get_keyword_tool's
+    per-row debug print used to dump each one in full -- a single run's log
+    became an unreadable wall of text (confirmed live)."""
+    return keyword if len(keyword) <= limit else keyword[: limit - 3] + "..."
+
+
 @function_tool
 def get_keyword_tool():
     """Fetches an available keyword from ContentSpark_Keywords and marks it as used."""
     try:
+        # Idempotent re-claim: if this process already claimed a row, hand it
+        # back instead of scanning again. This is what makes a fallback re-run
+        # of the Triage Agent safe -- see _keyword_claim's comment.
+        if _keyword_claim["keyword"] is not None:
+            return {
+                "selected_keyword": _keyword_claim["keyword"],
+                "status_update": (
+                    f"Row {_keyword_claim['row_index']} already claimed by this run; "
+                    "re-issuing the same keyword (sheet unchanged)."
+                ),
+            }
+
         client = get_gspread_client()
         sheet = client.open("ContentSpark_Keywords").sheet1
 
@@ -118,7 +153,7 @@ def get_keyword_tool():
         # Find the first available keyword
         for i, record in enumerate(records, 2):  # Start at row 2 (skip header)
             status = record.get("Status", "").strip().lower()
-            print(f"Row {i}: Keyword={record.get('Keyword', '')}, Status={status}")  # Debug
+            print(f"Row {i}: Keyword={_keyword_preview(record.get('Keyword', ''))}, Status={status}")  # Debug
             if status == "available":
                 keyword = record.get("Keyword", "")
                 if not keyword:
@@ -126,16 +161,62 @@ def get_keyword_tool():
                     continue
                 # Mark as used
                 sheet.update_cell(i, 2, "used")  # Status column is 2nd
+                _keyword_claim["row_index"] = i
+                _keyword_claim["keyword"] = keyword
                 return {
                     "selected_keyword": keyword,
                     "status_update": f"Row {i} marked as used"
                 }
-        
+
         return {"error": "No available keywords found"}
-    
+
     except Exception as e:
         # print(f"Error in get_keyword_tool: {str(e)}")  # Debug
         return {"error": f"Failed to fetch keyword: {str(e)}"}
+
+
+def release_keyword_claim() -> bool:
+    """Returns the most recently claimed keyword row to Status="available"
+    and forgets the claim. Called by the research workflow whenever a run
+    that claimed a keyword fails before its findings are persisted to
+    research_data -- without this, any post-claim failure (model 503s, agent
+    retry exhaustion, output agent failure) permanently burns the keyword
+    even though nothing was researched. Best-effort: a row that no longer
+    matches the claimed keyword (sheet edited/deleted mid-run) is left
+    alone rather than blindly flipping some other row's Status cell."""
+    row_index = _keyword_claim.get("row_index")
+    keyword = str(_keyword_claim.get("keyword") or "")
+    clear_keyword_claim()
+    if row_index is None:
+        return False
+    try:
+        client = get_gspread_client()
+        sheet = client.open("ContentSpark_Keywords").sheet1
+        current = str(sheet.cell(row_index, 1).value or "")
+        # Prefix compare as well as exact: guards against a mid-run sheet edit
+        # shifting rows, without needing the full (possibly huge) keyword to
+        # round-trip identically through the API.
+        if current != keyword and current[:100] != keyword[:100]:
+            logger.warning(
+                f"Not releasing keyword claim: row {row_index} now holds different "
+                f"content ({_keyword_preview(current)}) than what was claimed."
+            )
+            return False
+        sheet.update_cell(row_index, 2, "available")
+        logger.info(f"Released keyword claim: row {row_index} back to 'available'.")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to release keyword claim on row {row_index}: {e}")
+        return False
+
+
+def clear_keyword_claim() -> None:
+    """Forgets the in-process claim WITHOUT touching the sheet -- used when a
+    workflow that claimed a keyword completes successfully, so the row stays
+    legitimately "used" but a later workflow in the same long-lived process
+    (main.py's server) doesn't get handed the stale keyword again."""
+    _keyword_claim["row_index"] = None
+    _keyword_claim["keyword"] = None
 
 
 

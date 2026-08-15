@@ -8,7 +8,7 @@ from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extra
 from tools.tools import get_author_context_tool
 from blog_agent.hooks import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
+from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool, release_keyword_claim, clear_keyword_claim
 from blog_agent.custom_runner import FallbackAgentRunner
 
 
@@ -32,6 +32,16 @@ _REFUSAL_MARKERS = (
     "please provide a valid keyword",
     "no keyword or url",
     "unable to conduct research",
+    # get_keyword_tool's own error ({"error": "No available keywords found"})
+    # gets relayed by the Triage Agent as a paraphrased sentence, not a
+    # literal echo of the dict -- confirmed live, "No available keywords
+    # found in the ContentSpark_Keywords sheet" slipped through every
+    # marker above (none of them match "no available keyword(s)" phrasing
+    # at all) and was handed to the Researcher Agent as if it were a real
+    # topic, which then went and researched the *error message itself*.
+    "no available keyword",
+    "no keywords available",
+    "no keywords found in",
 )
 
 
@@ -41,6 +51,43 @@ def _looks_like_refusal_or_empty(text: str) -> bool:
         return True
     lowered = stripped.lower()
     return any(marker in lowered for marker in _REFUSAL_MARKERS)
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
+
+
+def _run_looks_failed(result) -> bool:
+    """Whether an agent run genuinely failed -- checked against its actual
+    final_output text only, never a substring match over the whole
+    RunResult repr. The old `"error" not in str(result)` checks were wrong
+    in both directions, confirmed live in the same production incident:
+    (1) false negative -- get_keyword_tool's {"error": ...} dict, once
+    paraphrased into a plain sentence by the Triage Agent, contains no
+    literal "error" substring at all, so a genuine "nothing available"
+    result sailed through as a "success"; (2) false positive -- a fully
+    successful Research Agent run whose findings happened to discuss "a
+    configuration error" in its own prose got treated as a failed run
+    (str(RunResult) includes the entire output, not just a status field),
+    retried needlessly, then reported as failed after retries -- exactly
+    the crash in the pasted log. Only trusts an explicit structured failure
+    signal (a JSON {"status": "error", ...} or a bare {"error": ...} with
+    no accompanying data), never a bare substring anywhere in the text."""
+    output_text = str(getattr(result, "final_output", result)).strip()
+    if not output_text:
+        return True
+    fence_match = _JSON_FENCE_RE.search(output_text)
+    json_text = fence_match.group(1) if fence_match else output_text
+    try:
+        parsed = json.loads(json_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False  # Not JSON at all (e.g. Triage's plain keyword string) -- can't be a structured error.
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("status") == "error":
+        return True
+    if "error" in parsed and not any(k in parsed for k in ("data", "status", "result")):
+        return True
+    return False
 
 async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS, max_retries: int = 2) -> Dict[str, Optional[str]]:
     """
@@ -280,19 +327,24 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
                 "Check the Keyword sheet and return the next keyword or topic",
                 max_turns=MAX_TURNS
             )
-            
-            if "error" not in str(triage_result):
+
+            if not _run_looks_failed(triage_result):
                 logger.info("Triage Agent completed successfully")
                 break
             else:
                 logger.warning(f"Triage Agent failed on attempt {attempt + 1}: {str(triage_result)}")
         except Exception as e:
             logger.warning(f"Triage Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-        
+
         if attempt < max_retries - 1:  # Don't sleep on the last attempt
             await asyncio.sleep(2 ** attempt)  # Exponential backoff
-    
-    if triage_result is None or "error" in str(triage_result):
+
+    if triage_result is None or _run_looks_failed(triage_result):
+        # A row may have been claimed (marked "used") by an earlier attempt
+        # within this same retry loop before the run ultimately failed --
+        # release it rather than permanently burning a keyword for zero
+        # research done.
+        release_keyword_claim()
         return {"error": f"Triage Agent failed after {max_retries} attempts: {str(triage_result)}"}
 
     input_string = triage_result.final_output if hasattr(triage_result, 'final_output') else str(triage_result)  # The output is a single string
@@ -305,6 +357,9 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     # Researcher Agent, which would otherwise research nothing and the
     # Output Agent would then write an "N/A" row full of an apology
     # sentence straight into research_data (confirmed live in production).
+    # No claim to release here -- get_keyword_tool only sets a claim when it
+    # actually found and marked an available row; this path means it found
+    # none, so there's nothing to release.
     if _looks_like_refusal_or_empty(input_string):
         logger.info("Triage Agent found no available keyword; skipping research this run.")
         return {"status": "no_available_keywords", "message": "No available keywords found in ContentSpark_Keywords."}
@@ -325,19 +380,25 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
                 research_input,
                 max_turns=MAX_TURNS
             )
-            
-            if "error" not in str(research_result):
+
+            if not _run_looks_failed(research_result):
                 logger.info("Research Agent completed successfully")
                 break
             else:
                 logger.warning(f"Research Agent failed on attempt {attempt + 1}: {str(research_result)}")
         except Exception as e:
             logger.warning(f"Research Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-        
+
         if attempt < max_retries - 1:  # Don't sleep on the last attempt
             await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-    if research_result is None or "error" in str(research_result):
+    if research_result is None or _run_looks_failed(research_result):
+        # A real keyword WAS claimed (Triage succeeded) but research never
+        # delivered -- release it instead of losing the topic permanently.
+        # This is the exact failure class that lost the GLM 5.3 topic: the
+        # row was marked "used" the moment it was selected, with no way
+        # back if anything downstream failed.
+        release_keyword_claim()
         return {"error": f"Research Agent failed after {max_retries} attempts: {str(research_result)}"}
 
     # Belt-and-suspenders version of the same check as above: if the
@@ -347,11 +408,12 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     research_output_text = str(getattr(research_result, "final_output", research_result))
     if _looks_like_refusal_or_empty(research_output_text):
         logger.info("Researcher Agent declined to research an empty/invalid input; skipping this run.")
+        release_keyword_claim()
         return {"status": "no_available_keywords", "message": "Researcher Agent had nothing usable to research."}
 
     # Step 4: Run Output Agent with research results with retry logic
     output_input = f"Here are the research findings that need to be consolidated into the research_data worksheet:\n\n{str(research_result)}\n\nPlease process these findings and add them to the worksheet using efficient data handling - append rows directly without loading all existing data."
-    
+
     output_result = None
     for attempt in range(max_retries):
         try:
@@ -361,20 +423,30 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
                 output_input,  # Pass the research results as a string
                 max_turns=MAX_TURNS
             )
-            
-            if "error" not in str(output_result):
+
+            if not _run_looks_failed(output_result):
                 logger.info("Output Agent completed successfully")
                 break
             else:
                 logger.warning(f"Output Agent failed on attempt {attempt + 1}: {str(output_result)}")
         except Exception as e:
             logger.warning(f"Output Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-        
+
         if attempt < max_retries - 1:  # Don't sleep on the last attempt
             await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-    if output_result is None or "error" in str(output_result):
+    if output_result is None or _run_looks_failed(output_result):
+        # Research succeeded but never made it into research_data -- from
+        # the pipeline's perspective this topic still has zero usable
+        # output, so release the claim the same as a Research-stage failure.
+        release_keyword_claim()
         return {"error": f"Output Agent failed after {max_retries} attempts: {str(output_result)}"}
+
+    # Success end-to-end: the claim should stay "used" on the sheet (that's
+    # correct, this keyword really was consumed), but forget the in-process
+    # claim so a later call in the same long-lived process (main.py) can't
+    # be handed this stale keyword again.
+    clear_keyword_claim()
 
     # input_string is the Triage Agent's exact selected keyword/topic (its
     # prompt requires returning it unmodified) -- surfaced here so the caller
