@@ -91,7 +91,21 @@ class SanityAdapter:
                 results = response.json().get("result", [])
                 if results:
                     logger.info(f"Fetched {len(results)} internal links for keywords {topic_words}.")
-                    break
+                else:
+                    logger.info(f"No matches for keywords {topic_words} on a successful query -- falling through to the broader query, not retrying an identical request.")
+                # A successful request (whether or not it found matches) is a
+                # definitive answer, not a transient failure -- break either
+                # way. Confirmed live: this used to only break when `results`
+                # was truthy, so a legitimately-empty-but-successful response
+                # (200 OK, zero matching posts) never incremented `attempt`
+                # either (that only happens in the except branch below), and
+                # the loop condition `attempt < max_retries` stayed true
+                # forever -- an actual infinite loop hammering the same
+                # identical Sanity query with no delay, for 15+ minutes
+                # straight until the GitHub Actions job's own timeout killed
+                # it. Only genuine request failures (caught below) should
+                # consume a retry attempt.
+                break
             except Exception as e:
                 logger.warning(f"Query failed for keywords {topic_words} (attempt {attempt + 1}): {e}")
                 attempt += 1
