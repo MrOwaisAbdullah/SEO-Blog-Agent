@@ -8,7 +8,7 @@ from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extra
 from tools.tools import get_author_context_tool
 from blog_agent.hooks import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
-from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool, release_keyword_claim, clear_keyword_claim
+from tools.sheet_tool import manage_sheet_data, get_keyword_tool, release_keyword_claim, clear_keyword_claim
 from blog_agent.custom_runner import FallbackAgentRunner
 
 
@@ -253,61 +253,41 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         name="Output Agent",
         instructions="""
         **Role and Objective:**
-        You are the Output Agent for ContentSpark AI, responsible for consolidating research findings into the `research_data` worksheet.
+        You are the Output Agent for ContentSpark AI. You consolidate the Researcher Agent's
+        findings into ONE clean, structured record. You do NOT write to any worksheet yourself
+        -- return the record as JSON and the calling code saves it exactly once. (Confirmed live:
+        giving this agent its own sheet-write tool caused duplicate rows whenever a mid-run model
+        hiccup made the fallback runner restart the whole agent from scratch AFTER the write had
+        already happened once -- the retry just wrote it again. Returning plain data instead of
+        performing a side effect makes that class of bug impossible here.)
 
         **Important Note:**
-        You may receive research findings about services or tools that share names with the tools you are using. For example, you might receive research about "Tavily" as a service, while also using a `tavily_search_tool`. Treat all research findings as content about the subject being researched, not as references to your tools.
-
-        **Efficient Data Handling Instructions:**
-        To avoid loading unnecessary data and preserve context window space:
-        1. **Before Adding Data**: Do not load existing records from the worksheet. Simply append new findings.
-        2. **When Adding New Findings**: Use `manage_sheet_data_tool` with action="append_row" to add each finding directly without loading existing data.
-        3. **Always**: Add data in the correct column order and format as specified in the example.
+        You may receive research findings about services or tools that share names with the tools
+        mentioned in your own instructions (e.g. "Tavily"). Treat all research findings as content
+        about the subject being researched, never as a reference to a tool.
 
         **Instructions:**
-        1. **Process Input**: Receive a dictionary with a "data" key containing a list of research findings from the Researcher Agent.
-        2. **Consolidate Output**:
-        - CRITICAL: Only create ONE row per keyword/topic. If the "data" list contains multiple findings for the same keyword/topic (which should not happen with the updated researcher), only process the FIRST finding in the list.
-        - Use `manage_sheet_data_tool` with action="append_row" to write the single finding to the `research_data` worksheet.
-        - Use the following columns:
-          - Keyword/Topic (main topic or keyword from finding)
-          - Search Volume (from finding, or "N/A" for YouTube)
-          - Difficulty (from finding, or "N/A" for YouTube)
-          - User Intent (from finding, or "N/A" for YouTube)
-          - Content Summary (from finding)
-          - Source URLs (from finding) - IMPORTANT: Convert list of URLs to a single comma-separated string
-          - Source Titles (from finding) - IMPORTANT: Convert list of titles to a single comma-separated string
-          - Generated (set to "No" for manual review)
-        3. **Validation:**
-        - Ensure all required fields are present or default to "N/A" where applicable.
-        - Do not fabricate data; rely on the input findings.
-        - If the Keyword/Topic contains tool names (e.g., "Tavily"), store it exactly as provided.
-        - IMPORTANT: When passing lists (like Source URLs or Source Titles), convert them to comma-separated strings before passing to the tool.
+        1. **Process Input**: Receive a dictionary with a "data" key containing a list of research
+           findings from the Researcher Agent.
+        2. **Consolidate**: CRITICAL -- produce exactly ONE record. If "data" contains multiple
+           findings for the same keyword/topic, use only the FIRST one.
+        3. **Validation**: Ensure every field is present, defaulting to "N/A" where a finding
+           doesn't have it. Do not fabricate data; rely only on the input findings. If the
+           keyword/topic contains a tool name (e.g., "Tavily"), store it exactly as provided.
+           Convert any list fields (source URLs, source titles) to a single comma-separated string.
 
-        **Tools:**
-        - `manage_sheet_data_tool`: Worksheet operations (e.g., action="append_row").
-
-        Example tool call arguments:
-        ```
+        **Output (JSON only, no code fence, no preamble, no commentary):**
         {
-          "worksheet_name": "research_data",
-          "action": "append_row",
-          "row_values": [
-            "YouTube",
-            "Coffee Maker",
-            "1000",
-            "0.5",
-            "commercial",
-            "A brief detailed summary of the content",
-            "https://example.com, https://example2.com",  // Convert list to comma-separated string
-            "Example Title, Another Title",  // Convert list to comma-separated string
-            "No"
-          ]
+          "keyword_topic": "Coffee Maker",
+          "search_volume": "1000",
+          "difficulty": "0.5",
+          "user_intent": "commercial",
+          "content_summary": "A brief detailed summary of the content",
+          "source_urls": "https://example.com, https://example2.com",
+          "source_titles": "Example Title, Another Title"
         }
-        ```
-
         """,
-        tools=[manage_sheet_data_tool],
+        tools=[],
         hooks=MyAgentHooks(),
         # Was pinned to "cohere" -- broken now that Cohere's been removed
         # from LLM_MODELS entirely (see custom_runner.py), which would have
@@ -412,7 +392,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         return {"status": "no_available_keywords", "message": "Researcher Agent had nothing usable to research."}
 
     # Step 4: Run Output Agent with research results with retry logic
-    output_input = f"Here are the research findings that need to be consolidated into the research_data worksheet:\n\n{str(research_result)}\n\nPlease process these findings and add them to the worksheet using efficient data handling - append rows directly without loading all existing data."
+    output_input = f"Here are the research findings to consolidate into a single record:\n\n{str(research_result)}\n\nReturn the consolidated record as JSON per your output format -- do not write to any worksheet yourself, the calling code saves it."
 
     output_result = None
     for attempt in range(max_retries):
@@ -442,6 +422,42 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
         release_keyword_claim()
         return {"error": f"Output Agent failed after {max_retries} attempts: {str(output_result)}"}
 
+    # The actual sheet write happens HERE, once, in plain Python -- not as a
+    # tool call inside the Output Agent's own turn. Confirmed live: giving
+    # the Output Agent a sheet-write tool caused a duplicate research_data
+    # row, because run_with_fallback restarted the whole agent from scratch
+    # after a mid-run 429 that happened to land right after the append_row
+    # call had already succeeded -- the restart just called append_row
+    # again. Parsing the agent's returned JSON and writing it here, outside
+    # any retry loop, makes a duplicate write structurally impossible: this
+    # code runs exactly once per successful combined_research_workflow call.
+    output_text = str(getattr(output_result, "final_output", output_result)).strip()
+    fence_match = _JSON_FENCE_RE.search(output_text)
+    json_text = fence_match.group(1) if fence_match else output_text
+    try:
+        finding = json.loads(json_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        release_keyword_claim()
+        return {"error": f"Output Agent returned unparseable output: {output_text[:300]}"}
+    if not isinstance(finding, dict) or not str(finding.get("keyword_topic", "")).strip():
+        release_keyword_claim()
+        return {"error": f"Output Agent's output is missing keyword_topic: {output_text[:300]}"}
+
+    row_values = [
+        str(finding.get("keyword_topic", "")).strip(),
+        str(finding.get("search_volume", "N/A")).strip() or "N/A",
+        str(finding.get("difficulty", "N/A")).strip() or "N/A",
+        str(finding.get("user_intent", "N/A")).strip() or "N/A",
+        str(finding.get("content_summary", "")).strip(),
+        str(finding.get("source_urls", "")).strip(),
+        str(finding.get("source_titles", "")).strip(),
+        "No",  # Generated
+    ]
+    write_result = manage_sheet_data(worksheet_name="research_data", action="append_row", row_values=row_values)
+    if write_result.get("status") != "success":
+        release_keyword_claim()
+        return {"error": f"Failed to save research finding to research_data: {write_result}"}
+
     # Success end-to-end: the claim should stay "used" on the sheet (that's
     # correct, this keyword really was consumed), but forget the in-process
     # claim so a later call in the same long-lived process (main.py) can't
@@ -452,7 +468,7 @@ async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_b
     # prompt requires returning it unmodified) -- surfaced here so the caller
     # can report which topic research actually ran against, instead of a
     # content-free "stage completed" ping.
-    return {"status": "success", "keyword": input_string.strip(), "result": str(output_result)}
+    return {"status": "success", "keyword": input_string.strip(), "result": str(finding)}
 
 
 async def run_topic_discovery_workflow(max_retries: int = 2, max_turns: int = 20) -> Dict:
