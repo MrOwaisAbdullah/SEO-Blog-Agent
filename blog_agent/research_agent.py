@@ -10,6 +10,7 @@ from blog_agent.hooks import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from tools.sheet_tool import manage_sheet_data, get_keyword_tool, release_keyword_claim, clear_keyword_claim
 from blog_agent.custom_runner import FallbackAgentRunner
+from lib.run_result_utils import run_looks_failed as _run_looks_failed
 
 
 # Configure logging
@@ -52,42 +53,6 @@ def _looks_like_refusal_or_empty(text: str) -> bool:
     lowered = stripped.lower()
     return any(marker in lowered for marker in _REFUSAL_MARKERS)
 
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
-
-
-def _run_looks_failed(result) -> bool:
-    """Whether an agent run genuinely failed -- checked against its actual
-    final_output text only, never a substring match over the whole
-    RunResult repr. The old `"error" not in str(result)` checks were wrong
-    in both directions, confirmed live in the same production incident:
-    (1) false negative -- get_keyword_tool's {"error": ...} dict, once
-    paraphrased into a plain sentence by the Triage Agent, contains no
-    literal "error" substring at all, so a genuine "nothing available"
-    result sailed through as a "success"; (2) false positive -- a fully
-    successful Research Agent run whose findings happened to discuss "a
-    configuration error" in its own prose got treated as a failed run
-    (str(RunResult) includes the entire output, not just a status field),
-    retried needlessly, then reported as failed after retries -- exactly
-    the crash in the pasted log. Only trusts an explicit structured failure
-    signal (a JSON {"status": "error", ...} or a bare {"error": ...} with
-    no accompanying data), never a bare substring anywhere in the text."""
-    output_text = str(getattr(result, "final_output", result)).strip()
-    if not output_text:
-        return True
-    fence_match = _JSON_FENCE_RE.search(output_text)
-    json_text = fence_match.group(1) if fence_match else output_text
-    try:
-        parsed = json.loads(json_text)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False  # Not JSON at all (e.g. Triage's plain keyword string) -- can't be a structured error.
-    if not isinstance(parsed, dict):
-        return False
-    if parsed.get("status") == "error":
-        return True
-    if "error" in parsed and not any(k in parsed for k in ("data", "status", "result")):
-        return True
-    return False
 
 async def combined_research_workflow(LLM_MODELS, is_model_available, get_model_by_name, increment_usage, MAX_TURNS, max_retries: int = 2) -> Dict[str, Optional[str]]:
     """

@@ -11,12 +11,14 @@ import asyncio
 from typing import Dict, Any, Optional, List
 from agents import Agent, ModelSettings, function_tool
 from tools.tools import get_stock_image_tool, generate_image_tool
+from tools.screenshot_tool import capture_screenshot_tool
 import requests
 from io import BytesIO
 from PIL import Image
 import base64
 from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.hooks import MyAgentHooks
+from lib.run_result_utils import run_looks_failed
 
 # Create a custom runner instance to access the get_model_by_name method
 custom_runner = FallbackAgentRunner()
@@ -166,13 +168,32 @@ contextual_image_insertion_agent = Agent(
     - Include modifiers like "professional," "modern," or "business"
     - Avoid overly restrictive terms that might yield no results
     
+    ## Real Screenshots Instead of Stock Photos (when it genuinely applies):
+    If the surrounding content is specifically about a real, named tool/product/dashboard --
+    not a general concept -- a genuine screenshot of that tool is more trustworthy than a stock
+    photo, and you should prefer it when you can.
+    - **HARD REQUIREMENT**: only call `capture_screenshot_tool` with a URL that appears
+      VERBATIM in this input's `EXTERNAL_LINKS_MD` field (already-verified real sources from
+      earlier in the pipeline). Never construct, guess, or recall a URL from your own training
+      data -- an invented-but-plausible URL is worse than no screenshot, same rule as internal
+      links elsewhere in this pipeline.
+    - If no URL in `EXTERNAL_LINKS_MD` is a genuine match for what this section discusses, do
+      not force it -- fall back to the normal stock-photo process below.
+    - `capture_screenshot_tool` can only see a logged-out, public view of a page -- do not use
+      it for anything that clearly requires being logged in (a personal dashboard, an admin
+      panel). If it returns an `error`, treat that exactly like a failed stock-image fetch: log
+      it and fall back to `get_stock_image_tool` for that section instead of skipping the image
+      entirely.
+    - Still run any screenshot through `evaluate_image_quality` like every other image before
+      inserting it.
+
     ## Image Fetching Process:
     1. **Create Search Query**: Formulate a specific search term from the key concepts
     2. **Call get_stock_image_tool**: Use the tool with your search query to find a real stock image
     3. **Handle Results**: Extract the actual image URL and alt text from the tool response
     4. **Retry Logic**: If the first attempt fails, try alternative search terms
     5. **IMPORTANT**: NEVER use example URLs like "https://example.com/image-url.jpg"
-    
+
     ## Image Evaluation Process:
     1. **Call evaluate_image_quality**: Pass the image URL to assess relevance and quality
     2. **Check Score**: Only insert images with a score of 7.0 or higher
@@ -309,6 +330,7 @@ contextual_image_insertion_agent = Agent(
     """,
     tools=[
         get_stock_image_tool,
+        capture_screenshot_tool,
         image_quality_evaluation_agent.as_tool(tool_name="evaluate_image_quality", tool_description="Evaluates image quality and relevance for contextual placement")
     ],
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
@@ -468,18 +490,18 @@ async def run_image_selection_workflow(input_data: Any, max_retries: int = 2) ->
                     max_turns=max_turns
                 )
                 
-                if "error" not in str(image_result).lower():
+                if not run_looks_failed(image_result):
                     logger.info("Image Selection Agent completed successfully")
                     break
                 else:
                     logger.warning(f"Image Selection Agent failed on attempt {attempt + 1}: {str(image_result)}")
             except Exception as e:
                 logger.warning(f"Image Selection Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-            
+
             if attempt < max_retries - 1:  # Don't sleep on the last attempt
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-        if image_result is None or "error" in str(image_result).lower():
+        if image_result is None or run_looks_failed(image_result):
             logger.error(f"Image Selection Agent failed after {max_retries} attempts")
             return {"status": "error", "error": f"Image Selection Agent failed after {max_retries} attempts: {str(image_result)}"}
 
@@ -514,18 +536,18 @@ async def run_contextual_image_insertion_workflow(input_data: Any, max_retries: 
                     max_turns=max_turns
                 )
                 
-                if "error" not in str(insertion_result).lower():
+                if not run_looks_failed(insertion_result):
                     logger.info("Contextual Image Insertion Agent completed successfully")
                     break
                 else:
                     logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1}: {str(insertion_result)}")
             except Exception as e:
                 logger.warning(f"Contextual Image Insertion Agent failed on attempt {attempt + 1} with exception: {str(e)}")
-            
+
             if attempt < max_retries - 1:  # Don't sleep on the last attempt
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-        if insertion_result is None or "error" in str(insertion_result).lower():
+        if insertion_result is None or run_looks_failed(insertion_result):
             logger.error(f"Contextual Image Insertion Agent failed after {max_retries} attempts")
             return {"status": "error", "error": f"Contextual Image Insertion Agent failed after {max_retries} attempts: {str(insertion_result)}"}
 

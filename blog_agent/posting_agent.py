@@ -10,6 +10,7 @@ import json
 import asyncio
 import copy
 from blog_agent.custom_runner import FallbackAgentRunner
+from lib.run_result_utils import run_looks_failed
 
 
 custom_runner = FallbackAgentRunner()
@@ -548,7 +549,7 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
                     if _sanity_publish_already_succeeded(posting_result):
                         logger.info("Posting Agent completed successfully (Sanity publish confirmed via tool output)")
                         break
-                    if "error" not in str(posting_result).lower():
+                    if not run_looks_failed(posting_result):
                         logger.info("Posting Agent completed successfully")
                         break
                     else:
@@ -562,7 +563,7 @@ async def run_posting_workflow(max_retries: int = 2) -> Dict[str, Any]:
             if posting_result is None:
                 logger.error(f"Posting Agent failed after {max_retries} attempts")
                 return {"status": "error", "error": f"Posting Agent failed after {max_retries} attempts: {str(posting_result)}"}
-            if not _sanity_publish_already_succeeded(posting_result) and "error" in str(posting_result).lower():
+            if not _sanity_publish_already_succeeded(posting_result) and run_looks_failed(posting_result):
                 logger.error(f"Posting Agent failed after {max_retries} attempts")
                 return {"status": "error", "error": f"Posting Agent failed after {max_retries} attempts: {str(posting_result)}"}
 

@@ -380,7 +380,56 @@ def _get_keywords_worksheet():
     return _get_gspread_client().open(KEYWORDS_SPREADSHEET_NAME).sheet1
 
 
-def set_approval(title: str, status: str) -> bool:
+# Raw approve/reject signal from every review decision, for the owner to
+# periodically mine into real brain/ entries -- never read by the content
+# pipeline itself. This lives in a Sheet, not a local file: the bot's Docker
+# build context is `discord_bot/` ONLY (see COPY bot.py in discord_bot/
+# Dockerfile, and _search_console_query's docstring above for the same
+# constraint already documented for a different tool) -- it has no access to
+# the repo's brain/ directory at all, and even if it did, this container's
+# filesystem doesn't persist across redeploys. A Sheet is the one storage
+# this bot and the GitHub-Actions-executed pipeline both actually share,
+# same as everywhere else in this system. A leading-underscore worksheet
+# name isn't a thing Sheets has, so the "never treated as a trusted brain
+# entry" guarantee instead lives in get_brain_notes_tool itself: it only
+# ever reads brain/*.md, never this worksheet -- promoting a pattern found
+# here into a real brain/ entry stays a deliberate, human, file-writing step.
+REVIEW_FEEDBACK_WORKSHEET = "review_feedback_log"
+_REVIEW_FEEDBACK_HEADERS = ["Timestamp", "Status", "Title", "Quality Score", "Summary"]
+
+
+async def _log_review_feedback(record: dict, status: str) -> None:
+    """Appends one row per review decision (Discord ✅/❌ or the chat
+    approval tool) to REVIEW_FEEDBACK_WORKSHEET so approve/disapprove
+    outcomes aren't lost the moment the reaction is handled. Uses the same
+    retry-on-rate-limit wrapper as add_keyword -- approve/reject reactions
+    can arrive in the same kind of burst that originally caused add_keyword
+    to silently lose topics (see docs/incident_ledger.md E4), so this write
+    needs the same protection from the start rather than waiting for a live
+    incident to prove it."""
+    try:
+        def _append():
+            client = _get_gspread_client()
+            spreadsheet = client.open(SPREADSHEET_NAME)
+            try:
+                worksheet = spreadsheet.worksheet(REVIEW_FEEDBACK_WORKSHEET)
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet = spreadsheet.add_worksheet(
+                    title=REVIEW_FEEDBACK_WORKSHEET, rows=100, cols=len(_REVIEW_FEEDBACK_HEADERS)
+                )
+                worksheet.append_row(_REVIEW_FEEDBACK_HEADERS, value_input_option="USER_ENTERED")
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            title = str(record.get("Title", "")).strip() or "(untitled)"
+            score = str(record.get("Quality Score", "")).strip()
+            summary = str(record.get("Summary", "")).strip()
+            worksheet.append_row([timestamp, status.upper(), title, score, summary], value_input_option="USER_ENTERED")
+
+        await _run_with_sheets_retry(_append, what="review feedback log append")
+    except Exception:
+        logger.exception("_log_review_feedback: failed to append to review_feedback_log")
+
+
+async def set_approval(title: str, status: str) -> bool:
     """Finds the row with the given Title in generated_posts and sets its
     Approve/Disapprove cell. Returns True if a matching row was found."""
     worksheet = _get_worksheet()
@@ -388,6 +437,7 @@ def set_approval(title: str, status: str) -> bool:
     for i, record in enumerate(records, start=2):  # row 1 is the header
         if str(record.get("Title", "")).strip() == title.strip():
             worksheet.update_cell(i, APPROVE_DISAPPROVE_COLUMN, status)
+            await _log_review_feedback(record, status)
             return True
     return False
 
@@ -821,34 +871,39 @@ def trigger_stage_tool(stage: str) -> dict:
 PUBLISHED_COLUMN = 7
 
 
-def _update_generated_posts_column(title_reference: str, col_index: int, value: str) -> dict:
+async def _update_generated_posts_column(title_reference: str, col_index: int, value: str) -> dict:
     worksheet = _get_worksheet()
     row_index = _find_row_index(worksheet, "Title", title_reference)
     if row_index is None:
         return {"found": False, "message": f"No post matching '{title_reference}' found in generated_posts."}
     worksheet.update_cell(row_index, col_index, value)
+    if col_index == APPROVE_DISAPPROVE_COLUMN:
+        headers = worksheet.row_values(1)
+        row_values = worksheet.row_values(row_index)
+        record = dict(zip(headers, row_values))
+        await _log_review_feedback(record, value)
     return {"found": True, "updated": True}
 
 
 @function_tool
-def mark_post_published_tool(title_reference: str) -> dict:
+async def mark_post_published_tool(title_reference: str) -> dict:
     """Marks a post's Published column as "Yes" in generated_posts, matched
     by a case-insensitive partial title match. Use this when the user tells
     you a post is already published (e.g. they published it manually, or it
     went out some other way) and the sheet needs to reflect that reality --
     otherwise the pipeline's own `post` stage would try to publish it again
     (Sanity has no dedup, so that would create a duplicate)."""
-    return _update_generated_posts_column(title_reference, PUBLISHED_COLUMN, "Yes")
+    return await _update_generated_posts_column(title_reference, PUBLISHED_COLUMN, "Yes")
 
 
 @function_tool
-def set_post_approval_tool(title_reference: str, approved: bool) -> dict:
+async def set_post_approval_tool(title_reference: str, approved: bool) -> dict:
     """Sets a post's Approve/Disapprove column in generated_posts, matched
     by a case-insensitive partial title match. Use this when the user tells
     you in chat to approve or reject a specific draft by name, as an
     alternative to reacting ✅/❌ in the approval channel."""
     status = "Approved" if approved else "Rejected"
-    return _update_generated_posts_column(title_reference, APPROVE_DISAPPROVE_COLUMN, status)
+    return await _update_generated_posts_column(title_reference, APPROVE_DISAPPROVE_COLUMN, status)
 
 
 # Must match scripts/run_stage.py's _CREATED_AT_FORMAT exactly -- that's the
@@ -1288,7 +1343,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     status = "Approved" if emoji == "✅" else "Rejected"
     try:
-        found = set_approval(title, status)
+        found = await set_approval(title, status)
     except Exception as e:
         logger.exception("Failed to update sheet for title %r", title)
         await channel.send(f"⚠️ Failed to record {status.lower()} for **{title}**: {e}")

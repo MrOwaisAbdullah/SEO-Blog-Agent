@@ -2,7 +2,7 @@ import asyncio
 import logging
 from agents import Agent, ModelSettings, AgentHooks,RunContextWrapper, handoff, Tool
 from blog_agent.custom_runner import FallbackAgentRunner
-from tools.tools import get_stock_image_tool, post_to_sanity_tool, get_author_context_tool, textstat_tool, grammar_check_tool, fetch_internal_links_tool
+from tools.tools import get_stock_image_tool, post_to_sanity_tool, get_author_context_tool, get_brain_notes_tool, textstat_tool, grammar_check_tool, fetch_internal_links_tool
 from lib.models import *
 from tools.sheet_tool import manage_sheet_data_tool, get_keyword_tool
 from tools.search_tools import web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_url_title
@@ -59,9 +59,11 @@ content_evaluation_agent = Agent(
         - Verify alignment with user intent (e.g., commercial for "best coffee maker 2025").  
         - Check comprehensive coverage of main topic and 4–6 subtopics (e.g., "Nespresso Features," "Budget Options").  
         - Confirm conversational tone with 1-3 questions per section (e.g., "Why do some coffee makers brew faster?").  
-        - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., "Claim about brewing speed unverified").  
-        - Flag unverified claims (e.g., "Claim about 30% time savings unverified").  
-        - Score: High (0.9–1.0) if intent-aligned, comprehensive, conversational, all claims verified; Medium (0.6–0.8) if partial alignment or some unverified claims; Low (<0.6) otherwise.  
+        - Fact-check claims using `tavily_extract_tool` or `tavily_crawl_tool` (max_depth=2, limit=10) on External Source Links; fallback to `web_search_tool` (past 30 days) if Tavily fails after 3 retries (5-second delay). Note unverified claims (e.g., "Claim about brewing speed unverified").
+        - Flag unverified claims (e.g., "Claim about 30% time savings unverified").
+        - **Build a claims ledger, not just a pass/fail score.** List every specific factual claim in the post (a number, a statistic, a named product's capability, a "studies show"-type assertion) with what verified it: the exact source URL you checked it against, or "UNVERIFIED" if no source confirmed it. This ledger is what goes into the `Notes` output field (format below) -- a vague "fact-checking limited; relied on brief" is not acceptable when specific claims exist to check.
+        - An UNVERIFIED claim caps Relevance at Medium even if everything else is strong, and must appear in the specific feedback so the writer either sources it or drops it.
+        - Score: High (0.9–1.0) if intent-aligned, comprehensive, conversational, all claims verified; Medium (0.6–0.8) if partial alignment or some unverified claims; Low (<0.6) otherwise.
         - **SEO (20%)**:
         - Verify word count (1500–2500 words).
         - Check primary/secondary keyword usage (2–3 uses each, natural).
@@ -142,7 +144,7 @@ content_evaluation_agent = Agent(
     "FAQs": "[{"question": "Can a coffee maker save you time?", "answer": "Yes, models like Nespresso automate brewing. [100–150 words]"}, {"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models. [100–150 words]"}]",
     "Score": 92,
     "Feedback": "",
-    "Notes": "",
+    "Notes": "Claims checked: 'Nespresso brews in under 30 seconds' verified via https://coffeereview.com/nespresso-review; 'saves users 30% of morning time' UNVERIFIED -- no source confirmed this, flagged in Feedback for removal or sourcing.",
     "errors": [],
     "warnings": []
     }
@@ -200,7 +202,12 @@ content_generator_agent = Agent(
         { "warnings": ["get_author_context_tool unavailable; used default tone"] }
     - Use the author's writing style, live bio, and current roles/skills to create content that sounds like it's written by a real person with genuine, up-to-date knowledge and experience. Write in first person singular ("I") to create a personal connection with the reader.
 
-    3. **Generate Blog Post:**  
+    2.5. **Retrieve Brain Notes (real experience, separate from style):**
+    - Call `get_brain_notes_tool` with the Keyword/Topic. This is different from `get_author_context_tool` above -- that controls tone; this returns the owner's actual first-hand stories, opinions, and numbers on this specific subject, if any have been recorded.
+    - If it returns one or more notes, weave the real detail in naturally where it fits the outline (often the introduction or the section closest to the story's subject) -- use it as-is, do not embellish it with extra specifics it doesn't contain.
+    - If it returns no notes (expected for most topics until the brain folder grows), proceed normally. Do NOT invent a personal anecdote, project, or number to compensate for an empty result -- an empty brain result is not a gap to fill with fabrication.
+
+    3. **Generate Blog Post:**
     - Generate a 1500–2500-word blog post in Markdown format, aligned with user intent and author context:  
     - **Title (H1)**: Include the primary keyword and make the title engaging and intent-driven. Create a compelling, curiosity-driven title that captures interest without being clickbait—it should invite a click while accurately reflecting what the reader will get on the page. The title must set a clear, deliverable expectation and the generated content must fulfil that promise. **Keep it to 50-60 characters.** The page's `<title>` tag appends a site-name suffix on top of this, and Google truncates displayed titles at roughly that length (~580px) -- a longer title just gets cut off mid-word in search results instead of giving you more visible text. Front-load the primary keyword so it survives even if truncation happens anyway. Important: This title will be used as the H1 heading for the page - do not include the title/H1 again in the generated content. The generated content should start directly with the introduction H2, not repeat the title as an H1.
     - **Summary (meta description)**: Also produce a short, SEO-friendly summary (50–160 characters) that includes the primary keyword, accurately summarizes the page, and can be used as the meta description in search results. This summary should be concise, compelling, and non-clickbait. **This field must follow the same Anti-AI-Pattern Checklist in section 4 below as the body content** -- it's the actual text a searcher reads in results before ever clicking through, so a generic AI-tell opener here (e.g. "In today's fast-paced world of...") is worse than one buried in paragraph three of the body. No signposting, no inflated-significance phrases, no vague attributions -- state the page's actual value plainly.
@@ -282,53 +289,34 @@ content_generator_agent = Agent(
     - If score ≥ 90% or after 3 iterations, proceed with the highest-scored version.
     - Retry `get_evaluation_feedback` up to 3 times with 5-second delays if it fails.
 
-    6. **Save Generated Content:**  
-    - Use `manage_sheet_data_tool` (action="append_row", worksheet_name="generated_posts") to save:  
-    - Title  (H1 heading with primary keyword, engaging and intent-driven, with no colons or semicolons)
-    - Generated Content (highest-scored Markdown string with integrated links) - IMPORTANT: This should be ONLY the content, NOT including the FAQs
-    - FAQs (JSON string) - IMPORTANT: This should be a separate JSON string containing the FAQs, not combined with the content
-    - Quality Score (integer in JSON response, but must be converted to string when calling `manage_sheet_data_tool`)
-    - Summary (SEO-friendly meta description, 50–160 characters, must include the primary keyword and accurately summarize the page)
-        - Approve/Disapprove ("Approved")  
-        - Published ("No")  
-    - The generated_posts worksheet has EXACTLY 7 columns, in this order: Title, Generated Content, FAQs, Quality Score, Summary, Approve/Disapprove, Published.
-      `row_values` MUST be a list of EXACTLY 7 strings in that exact order -- never fewer, never more, never reordered. A `row_values` list with the wrong number of elements silently shifts every value after the gap into the wrong column (e.g. a 5-element list puts the Published value into the Summary column instead of failing loudly) -- there is no validation on the sheet side, so getting this list right is entirely on you.
-    - Example tool call (7 elements in row_values, matching the 7 columns 1-for-1):
-        {
-        "worksheet_name": "generated_posts",
-        "action": "append_row",
-        "row_values": [
-          "best coffee maker 2025",
-          "## Introduction\n\nNespresso excels, per [Coffee Review](https://coffeereview.com)...",
-          "[{\"question\": \"Can a coffee maker save time?\", \"answer\": \"Yes, models like Nespresso...\"}]",
-          "92",
-          "Discover the best coffee makers of 2025, tested for speed, flavor, and value.",
-          "Approved",
-          "No"
-        ]
-            }
-    - IMPORTANT: All values in `row_values` must be strings, including numbers like Quality Score. Convert integers to strings (e.g., `92` should be `"92"`).
-    - IMPORTANT: When using the Quality Score from the content evaluation agent's response, make sure to convert it from integer to string before adding to `row_values`. For example, if the evaluation agent returns `"Quality Score": 92`, convert it to `"92"` when constructing the `row_values` array.
-    - Before calling the tool, count the elements in your `row_values` list and confirm it is exactly 7, in the exact column order above.
-    - Retry up to 3 times with 5-second delays; if it fails, include:  
-        { "errors": ["Failed to save to generated_posts after 3 attempts"] }
+    6. **Return the Generated Content (do NOT save it yourself):**
+    - **Do not call `manage_sheet_data_tool` to write to `generated_posts`, `claims_audit`, or `content_briefs`.** Those writes happen exactly once, in plain code, after this run finishes -- not as a tool call inside your own turn. (Why: if a transient error strikes between two of your own tool calls, the fallback runner restarts this whole agent from scratch on a retry, and a write you already made would get replayed, creating a duplicate row. Moving the write outside your turn makes that structurally impossible instead of just discouraged. `manage_sheet_data_tool` stays available to you for the read in Step 1 -- it just isn't used for saving anymore.)
+    - Instead, return everything the caller needs in the Output JSON below:
+        - Title (H1 heading with primary keyword, engaging and intent-driven, with no colons or semicolons)
+        - Generated Content (highest-scored Markdown string with integrated links) -- ONLY the content, NOT including the FAQs
+        - FAQs (JSON string, separate from the content)
+        - Quality Score (as a string, e.g. `"92"`)
+        - Summary (SEO-friendly meta description, 50-160 characters, must include the primary keyword and accurately summarize the page)
+        - Claims Notes (see 6.5 below)
 
-    7. **Update `content_briefs` Row:**  
-    - Use `manage_sheet_data_tool` (action="get_range", worksheet_name="content_briefs", cell_range="1:1") to identify the `Generated` column index.  
-    - Use `manage_sheet_data_tool` (action="update_cell", worksheet_name="content_briefs", row_index=[row_index], col_index=[Generated_column_index], data="Yes").
-    - When calling `update_cell`, the `data` parameter should be a simple string value, not a nested list. For example: `data="Yes"` not `data=[["Yes"]]`.  
-    - Retry up to 3 times with 5-second delays; if it fails, include:  
-        { "warnings": ["Failed to update Generated column in content_briefs after 3 attempts"] }  
+    6.5. **Include the Claims Notes field (do NOT save it yourself either):**
+    - `get_evaluation_feedback`'s last response included a `Notes` field with the claims ledger built during Step 5 (each factual claim mapped to a source URL or `UNVERIFIED`). Copy that value verbatim into the `Claims Notes` field of your Output JSON -- the caller persists it to a `claims_audit` worksheet after this run finishes, same reasoning as Step 6.
+    - **If Step 5/evaluation was skipped** (see Step 8's fallback -- `get_evaluation_feedback` unavailable), there is no real Notes/claims ledger. Do NOT invent one -- return `"Claims Notes": ""` in that case, and the caller will skip the claims_audit write entirely rather than record a fabricated or placeholder value.
 
-    8. **Persistence and Fallbacks:**  
-    - Retry all tools up to 3 times with 5-second delays.  
-    - Use fallbacks if Tavily tools fail.  
-    - If `get_evaluation_feedback` tool is unavailable or fails after retries, skip evaluation and proceed directly to save the generated content to the `generated_posts` worksheet and update the `Generated` column in `content_briefs` worksheet to "Yes".  
+    7. **(Removed.)** `content_briefs` row cleanup for the brief this run consumed is handled by
+    the caller after this run finishes, not by you -- do not call `manage_sheet_data_tool` to
+    touch `content_briefs` beyond the read in Step 1.
 
-    **Tools:**  
-    - `manage_sheet_data_tool`: Read from `content_briefs`, write to `generated_posts`, update `Generated` column.  
-    - `get_author_context_tool`: Retrieve author context with tone, emojis, banned words.  
-    - `tavily_search_tool`: Source user questions (1 credit/query).  
+    8. **Persistence and Fallbacks:**
+    - Retry all tools up to 3 times with 5-second delays.
+    - Use fallbacks if Tavily tools fail.
+    - If `get_evaluation_feedback` tool is unavailable or fails after retries, skip evaluation and proceed directly to returning the Output JSON below with `"Claims Notes": ""`.
+
+    **Tools:**
+    - `manage_sheet_data_tool`: Read the next ungenerated brief from `content_briefs` (Step 1) only -- no longer used for saving; the caller persists your output after this run completes.
+    - `get_author_context_tool`: Retrieve author context with tone, emojis, banned words.
+    - `get_brain_notes_tool`: Retrieve the owner's real first-hand stories/opinions/numbers for this topic, if any exist.
+    - `tavily_search_tool`: Source user questions (1 credit/query).
     - `tavily_extract_tool`: Fact-check content (1 credit/5 URLs).  
     - `tavily_crawl_tool`: Deep content exploration (1 credit/5 URLs).  
     - `web_search_tool` (fallback): Web content for fact-checking.  
@@ -347,13 +335,12 @@ content_generator_agent = Agent(
     "FAQs": "[{"question": "Can a coffee maker save you time?", "answer": "Yes, models like Nespresso automate brewing. [100–150 words]"}, {"question": "How do you choose a coffee maker for small spaces?", "answer": "Look for compact models. [100–150 words]"}]",
     "Quality Score": "92",
     "Summary": "Summary of the content of blog post in 2-4 sentences",
-    "Approve/Disapprove": "Approved" (By default its approved user can change it later),
-    "Published": "No",
+    "Claims Notes": "Claims checked: 'Nespresso brews in under 30 seconds' verified via https://coffeereview.com/nespresso-review; 'saves users 30% of morning time' UNVERIFIED.",
     "errors": [],
     "warnings": []
     }
     """,
-    tools=[manage_sheet_data_tool, get_author_context_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_internal_links_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements")],
+    tools=[manage_sheet_data_tool, get_author_context_tool, get_brain_notes_tool, web_search_tool, tavily_search_tool, tavily_extract_tool, tavily_crawl_tool, fetch_internal_links_tool, content_evaluation_agent.as_tool(tool_name="get_evaluation_feedback", tool_description="Get evaluation feedback for the content to use the feedback for improvements")],
     handoff_description="Use the given brief to create a high quality seo friendly Blog content, and use evaluation tools for feedback and improve the content using it.",
     hooks=MyAgentHooks(),
     model=custom_runner.get_model_by_name("gemini-flash-latest"),
@@ -600,6 +587,63 @@ repurpose_angle_agent = Agent(
     hooks=MyAgentHooks(),
     model=custom_runner.get_model_by_name("gemini-flash-lite-latest"),
     model_settings=ModelSettings(temperature=0.6),
+)
+
+feedback_pattern_agent = Agent(
+    name="Feedback Pattern Agent",
+    instructions="""
+    You are helping Owais Abdullah find recurring patterns in his raw post-approval history,
+    so he can decide whether any are worth writing up as a real brain/ entry (a genuine,
+    reasoned opinion or lesson he'd actually stand behind -- see brain/README.md for what that
+    folder is). You do NOT write brain entries yourself. You only propose candidates for a
+    human to review, edit, and decide on.
+
+    **Input:** a list of review-feedback rows (Timestamp, Status, Title, Quality Score, Summary)
+    from the review_feedback_log sheet.
+
+    **Task:**
+    1. Look for a REAL recurring pattern -- something that shows up across multiple rows, not a
+       one-off. Examples of a real pattern: "posts with a specific number/statistic in the title
+       get approved more than generic ones," "posts about [recurring topic] keep getting
+       rejected," "low-scoring posts (below ~75) are disproportionately rejected." A single
+       rejected post is NOT a pattern -- you need at least 3 rows pointing the same direction
+       before proposing anything.
+    2. For each real pattern found (0 to 3 of them, never invent one to have something to
+       report), propose a candidate brain entry:
+       - `pattern`: one sentence describing what you observed, in your own analytical voice
+         (this is YOUR observation, not Owais's -- do not write it in his first-person voice)
+       - `suggested_title`: a short title for the entry, if he chooses to write it
+       - `suggested_tags`: 2-4 comma-separated tags matching what get_brain_notes_tool would
+         match against (topic keywords likely to appear in future briefs)
+       - `evidence`: the specific Titles/rows that support this pattern (so he can verify it
+         himself rather than take your word for it)
+       - `draft_starting_point`: 1-2 sentences a human could use as a starting point if they
+         agree -- explicitly a draft, not something to be saved verbatim. Never invent a
+         specific number, story, or reason Owais never stated; only describe the pattern
+         itself, e.g. "Posts with a specific number in the title were approved 4 of 4 times;
+         generic titles were rejected 3 of 5 times" -- not a fabricated explanation of WHY.
+    3. If nothing in the data rises to a real pattern, return an empty `candidates` list. An
+       empty result is a normal, useful outcome -- do not stretch a coincidence into a pattern.
+
+    **Output (JSON only, no markdown fence):**
+    {
+      "status": "success",
+      "candidates": [
+        {
+          "pattern": "...",
+          "suggested_title": "...",
+          "suggested_tags": "...",
+          "evidence": "...",
+          "draft_starting_point": "..."
+        }
+      ],
+      "notes": "one sentence on how many rows you reviewed and your overall read"
+    }
+    """,
+    tools=[],
+    hooks=MyAgentHooks(),
+    model=custom_runner.get_model_by_name("gemini-flash-lite-latest"),
+    model_settings=ModelSettings(temperature=0.3),
 )
 
 brief_agent = Agent(

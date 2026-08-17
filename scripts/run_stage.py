@@ -38,7 +38,7 @@ import requests
 from agents import set_tracing_disabled
 from agents.run import set_default_agent_runner
 
-from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent, freshness_check_agent, repurposing_agent, repurpose_angle_agent
+from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent, freshness_check_agent, repurposing_agent, repurpose_angle_agent, feedback_pattern_agent
 from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
@@ -855,9 +855,42 @@ def _ensure_content_persisted(content: dict) -> dict:
     )
     if append_result.get("status") != "success":
         raise RuntimeError(f"Failed to persist content to generated_posts: {append_result}")
-    print(f"[content] Appended row to generated_posts for '{title}' (agent reported success but had not saved it).")
+    print(f"[content] Appended row to generated_posts for '{title}'.")
     _stamp_created_at("generated_posts", "Title", title)
     return row_values
+
+
+def _persist_claims_audit(content: dict, title: str, keyword: str) -> None:
+    """Appends the claims ledger content_generator_agent returned (its
+    Claims Notes field, sourced from get_evaluation_feedback's Notes) to the
+    claims_audit worksheet -- in plain code, exactly once, after the agent's
+    retry loop has fully exited. Deliberately NOT called from inside the
+    agent's own tool-calling loop (see Step 6/6.5 in content_generator_agent's
+    instructions and docs/incident_ledger.md E2): a write inside an agent's
+    turn can get replayed if run_with_fallback restarts the agent after a
+    transient error, which is exactly the bug this structure avoids. A
+    missing/empty Claims Notes (evaluation was skipped, or salvaged from raw
+    Markdown with no envelope) is expected, not an error -- skip silently
+    rather than record a fabricated row."""
+    claims_notes = str(_get_field(content, "Claims Notes", "")).strip()
+    if not claims_notes:
+        return
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    append_result = manage_sheet_data(
+        worksheet_name="claims_audit",
+        action="append_row",
+        row_values=[
+            title,
+            keyword,
+            str(_get_field(content, "Quality Score", "")).strip(),
+            claims_notes,
+            timestamp,
+        ],
+    )
+    if append_result.get("status") != "success":
+        print(f"[content] Warning: failed to save claims_audit row for '{title}': {append_result}")
+    else:
+        print(f"[content] Saved claims_audit row for '{title}'.")
 
 
 def _graduate_content_brief(row_index: int, keyword: str) -> None:
@@ -879,7 +912,17 @@ def _graduate_content_brief(row_index: int, keyword: str) -> None:
         print(f"[content] Removed content_briefs row {row_index} for '{keyword}' (content generated).")
 
 
+_CLAIMS_AUDIT_HEADERS = ["Title", "Keyword/Topic", "Quality Score", "Claims Notes", "Timestamp"]
+
+
 async def run_content() -> None:
+    # _persist_claims_audit (below, called after content_generator_agent
+    # returns) needs this worksheet to exist -- manage_sheet_data has no
+    # auto-create (see ensure_worksheet_exists's docstring). Same
+    # self-healing-schema pattern already used for repurposed_content below.
+    if not ensure_worksheet_exists("claims_audit", _CLAIMS_AUDIT_HEADERS):
+        print("[content] Warning: failed to ensure claims_audit worksheet exists; the claims ledger step may fail non-fatally.")
+
     source_brief = manage_sheet_data(
         worksheet_name="content_briefs", action="find_row_by_key",
         key_column="Generated", key_value="No",
@@ -941,6 +984,7 @@ async def run_content() -> None:
         print("[content] Agent returned raw Markdown instead of the JSON envelope; salvaged it instead of discarding a completed post.")
 
     persisted_row = _ensure_content_persisted(parsed)
+    _persist_claims_audit(parsed, str(persisted_row.get("Title", "")).strip(), source_keyword)
     if source_row_index is not None:
         _graduate_content_brief(source_row_index, source_keyword)
     _notify_discord(
@@ -1592,6 +1636,88 @@ async def run_search_performance_review() -> None:
     )
 
 
+# Below this, mining is unlikely to find anything but a coincidence --
+# matches feedback_pattern_agent's own instruction to need at least 3 rows
+# pointing the same direction before proposing a pattern.
+_MINE_FEEDBACK_MIN_ROWS = 5
+
+
+async def run_mine_feedback() -> None:
+    """Scans the review_feedback_log Google Sheet (every ✅/❌ approve/reject
+    decision from Discord -- see discord_bot/bot.py::_log_review_feedback and
+    brain/README.md) for a recurring pattern, and posts candidate brain/
+    entries to Discord for the owner to review. Never writes to brain/
+    itself -- feedback_pattern_agent proposes, the owner decides whether to
+    actually author a file, same human-gate as every other write-back path
+    in this system (S9 in the original design, "the owner picks"). On-demand
+    only, no cron: like repurpose, this is the owner's call to make, and the
+    log needs time to accumulate real signal between runs anyway."""
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+
+    def _notify(text: str) -> None:
+        if not webhook_url:
+            print("DISCORD_WEBHOOK_URL not set; skipping mine_feedback notification.")
+            return
+        try:
+            _post_discord_message(webhook_url, text)
+        except Exception as e:
+            print(f"Failed to send Discord mine_feedback notification: {e}")
+
+    result = manage_sheet_data(worksheet_name="review_feedback_log", action="get_all_records")
+    if result.get("status") != "success":
+        msg = "Couldn't read review_feedback_log this run (worksheet may not exist yet -- it's created on first approve/reject in Discord)."
+        print(f"[mine_feedback] {msg}")
+        _notify(f"🧠 Feedback mining: {msg}")
+        return
+
+    rows = result.get("data") or []
+    if len(rows) < _MINE_FEEDBACK_MIN_ROWS:
+        msg = f"Only {len(rows)} review decision(s) logged so far -- need at least {_MINE_FEEDBACK_MIN_ROWS} before a pattern search is worth running."
+        print(f"[mine_feedback] {msg}")
+        _notify(f"🧠 Feedback mining: {msg}")
+        return
+
+    rows_text = "\n".join(
+        f"- {r.get('Timestamp', '')} | {r.get('Status', '')} | \"{r.get('Title', '')}\" "
+        f"(score: {r.get('Quality Score', '')}) -- {r.get('Summary', '')}"
+        for r in rows
+    )
+    print(f"[mine_feedback] Analyzing {len(rows)} review-feedback rows.")
+
+    result = await custom_runner.run_with_fallback(
+        feedback_pattern_agent,
+        f"Here are the logged review decisions:\n\n{rows_text}",
+        max_turns=6,
+    )
+    output = str(getattr(result, "final_output", result)).strip()
+    parsed = _parse_agent_json(output)
+    if parsed is None or _get_field(parsed, "status") != "success":
+        raise RuntimeError(f"Feedback Pattern Agent failed to produce usable output: {output[:300]}")
+
+    candidates = parsed.get("candidates") or []
+    if not candidates:
+        notes = str(_get_field(parsed, "notes", "")).strip()
+        msg = f"Reviewed {len(rows)} decisions, no real pattern yet." + (f" {notes}" if notes else "")
+        print(f"[mine_feedback] {msg}")
+        _notify(f"🧠 Feedback mining: {msg}")
+        return
+
+    _notify(f"🧠 **Feedback mining found {len(candidates)} candidate pattern(s)** (reviewed {len(rows)} decisions). These are proposals only -- nothing is saved to brain/ automatically; write the file yourself (or ask me to) if one of these actually holds up.")
+    for c in candidates:
+        pattern = str(c.get("pattern", "")).strip()
+        if not pattern:
+            continue
+        _notify(
+            "**Candidate brain entry**\n\n"
+            f"**Pattern:** {pattern}\n"
+            f"**Suggested title:** {c.get('suggested_title', '')}\n"
+            f"**Suggested tags:** {c.get('suggested_tags', '')}\n"
+            f"**Evidence:** {c.get('evidence', '')}\n"
+            f"**Draft starting point:** {c.get('draft_starting_point', '')}"
+        )
+    print(f"[mine_feedback] Posted {len(candidates)} candidate(s) to Discord.")
+
+
 STAGE_HANDLERS = {
     "research": run_research,
     "brief": run_brief,
@@ -1602,6 +1728,7 @@ STAGE_HANDLERS = {
     "freshness_sweep": run_freshness_sweep,
     "repurpose": run_repurpose,
     "search_performance_review": run_search_performance_review,
+    "mine_feedback": run_mine_feedback,
 }
 
 
@@ -1626,7 +1753,7 @@ def main() -> None:
         # legitimately post nothing (no candidates found this run).
         if args.stage not in (
             "research", "brief", "content", "post", "edit_post", "repurpose",
-            "freshness_sweep", "search_performance_review",
+            "freshness_sweep", "search_performance_review", "mine_feedback",
         ):
             _notify_discord_status(args.stage, success=True)
 

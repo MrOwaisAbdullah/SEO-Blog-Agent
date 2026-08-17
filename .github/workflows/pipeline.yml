@@ -49,6 +49,7 @@ on:
           - freshness_sweep
           - repurpose
           - search_performance_review
+          - mine_feedback
       edit_title:
         description: '(edit_post only) Title (or partial title) of the post to edit'
         required: false
@@ -108,6 +109,37 @@ jobs:
         uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
+
+      # contextual_image_insertion_agent (the only caller of
+      # capture_screenshot_tool, tools/screenshot_tool.py) runs inside
+      # run_posting_workflow(), which the POST stage calls -- NOT content.
+      # content only drafts and evaluates text; images are selected/inserted
+      # later, when a post is actually being published. So the OS deps and
+      # browser download below are gated on 'post', not 'content'.
+      #
+      # OS-level shared libraries (libnss3 etc.) always need installing --
+      # ubuntu-latest is a fresh VM every run, so nothing here is ever
+      # already present regardless of caching. The ~180MB Chromium binary
+      # itself is a separate download and IS cacheable, so it's split into
+      # its own cached step (keyed on the exact playwright version pinned in
+      # uv.lock, since a version bump can ship an incompatible browser
+      # build) rather than bundled with `--with-deps`, which would silently
+      # skip the always-needed OS deps on a cache hit.
+      - name: Install Playwright OS dependencies (post stage only)
+        if: steps.resolve.outputs.stage == 'post'
+        run: uv run playwright install-deps chromium
+
+      - name: Cache Playwright Chromium binary
+        if: steps.resolve.outputs.stage == 'post'
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ hashFiles('uv.lock') }}
+
+      - name: Install Playwright Chromium binary (post stage only)
+        if: steps.resolve.outputs.stage == 'post' && steps.playwright-cache.outputs.cache-hit != 'true'
+        run: uv run playwright install chromium
 
       - name: Run stage
         env:

@@ -1,5 +1,6 @@
 from agents import function_tool
 import os
+import re
 import base64
 import requests
 import json
@@ -305,6 +306,58 @@ def get_author_context_tool():
         "key_highlights": [h.get("description") for h in profile.get("keyHighlights", []) if h.get("description")],
     }
     return static_context
+
+
+# The brain is separate from get_author_context_tool above: that's a static style
+# guide (tone, banned words, personas) that barely changes. This is the owner's
+# actual first-hand stories, opinions, and numbers, meant to grow over time as
+# entries are added -- see brain/README.md for the format.
+BRAIN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "brain")
+
+
+@function_tool
+def get_brain_notes_tool(topic: str):
+    """
+    Searches the brain/ knowledge base for the owner's real stories, opinions, and
+    numbers relevant to `topic`. Use this before drafting, in addition to (not instead
+    of) get_author_context_tool -- that tool controls how the writing sounds, this one
+    is what the writer actually knows first-hand.
+
+    Returns matching entries with their full text, or an empty list with a message if
+    nothing matches -- an empty result is expected and fine; it means write from
+    general research as usual and do NOT invent a personal anecdote or number to fill
+    the gap.
+    """
+    if not os.path.isdir(BRAIN_DIR):
+        return {"notes": [], "message": "No brain/ directory found."}
+
+    topic_words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", topic) if len(w) > 2}
+    matches = []
+    for fname in sorted(os.listdir(BRAIN_DIR)):
+        if not fname.endswith(".md") or fname.startswith("_") or fname.lower() == "readme.md":
+            continue
+        path = os.path.join(BRAIN_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            continue
+
+        lines = text.splitlines()
+        title = lines[0].lstrip("#").strip() if lines else fname
+        tags_line = next((l for l in lines[:6] if l.lower().startswith("tags:")), "")
+        tags = {t.strip().lower() for t in tags_line.split(":", 1)[1].split(",")} if tags_line else set()
+        title_words = {w.lower() for w in re.findall(r"[a-zA-Z0-9]+", title)}
+
+        if topic_words & (tags | title_words):
+            matches.append({"file": fname, "title": title, "content": text})
+
+    if not matches:
+        return {
+            "notes": [],
+            "message": "No brain notes found for this topic. Write from general research as usual -- do not invent a personal anecdote, story, or number to fill this gap.",
+        }
+    return {"notes": matches, "message": f"Found {len(matches)} brain note(s) relevant to '{topic}'."}
 
 
 @function_tool
