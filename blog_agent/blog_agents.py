@@ -204,7 +204,9 @@ content_generator_agent = Agent(
 
     2.5. **Retrieve Brain Notes (real experience, separate from style):**
     - Call `get_brain_notes_tool` with the Keyword/Topic. This is different from `get_author_context_tool` above -- that controls tone; this returns the owner's actual first-hand stories, opinions, and numbers on this specific subject, if any have been recorded.
-    - If it returns one or more notes, weave the real detail in naturally where it fits the outline (often the introduction or the section closest to the story's subject) -- use it as-is, do not embellish it with extra specifics it doesn't contain.
+    - Notes come in two kinds -- treat them differently:
+        - **Real voice entries** (no special marker) are the owner's own words: weave the real detail in naturally where it fits the outline (often the introduction or the section closest to the story's subject) -- use it as-is, do not embellish it with extra specifics it doesn't contain.
+        - **Coverage records** (content starts with "Coverage record (auto-logged from Discord approval, NOT personal voice)") are an auto-generated fact log of past approved posts, not the owner speaking. Use these ONLY for topic awareness -- e.g. to avoid repeating the exact same angle a prior post already covered, or to note that a topic has performed well before. **Never quote, paraphrase, or present a coverage record as a first-person story, opinion, or experience** -- it isn't one.
     - If it returns no notes (expected for most topics until the brain folder grows), proceed normally. Do NOT invent a personal anecdote, project, or number to compensate for an empty result -- an empty brain result is not a gap to fill with fabrication.
 
     3. **Generate Blog Post:**
@@ -598,31 +600,45 @@ feedback_pattern_agent = Agent(
     folder is). You do NOT write brain entries yourself. You only propose candidates for a
     human to review, edit, and decide on.
 
-    **Input:** a list of review-feedback rows (Timestamp, Status, Title, Quality Score, Summary)
-    from the review_feedback_log sheet.
+    **Input:** a list of review-feedback rows (Timestamp, Status, Title, Quality Score, Summary,
+    and sometimes a `REASON GIVEN` annotation) from the review_feedback_log sheet. A row with
+    `REASON GIVEN` means Owais himself typed that explanation at the moment he approved/rejected
+    it -- that is HIS stated reasoning, ground truth, not something you inferred. A row without
+    one just means he didn't say why; that silence is not evidence of anything.
 
     **Task:**
-    1. Look for a REAL recurring pattern -- something that shows up across multiple rows, not a
-       one-off. Examples of a real pattern: "posts with a specific number/statistic in the title
-       get approved more than generic ones," "posts about [recurring topic] keep getting
-       rejected," "low-scoring posts (below ~75) are disproportionately rejected." A single
-       rejected post is NOT a pattern -- you need at least 3 rows pointing the same direction
-       before proposing anything.
-    2. For each real pattern found (0 to 3 of them, never invent one to have something to
+    1. **Explicit reasons outrank inferred correlations.** If two or more rows give the SAME (or
+       clearly the same underlying) reason, that alone is a real pattern worth reporting even
+       without a title/score correlation backing it up -- his own stated reasoning is stronger
+       evidence than a pattern you noticed in title style. Quote or closely paraphrase what he
+       actually wrote; do not smooth it into different words.
+    2. Absent enough explicit reasons, fall back to looking for a REAL recurring pattern in the
+       structural data (title style, score, topic) -- something that shows up across multiple
+       rows, not a one-off. Examples: "posts with a specific number/statistic in the title get
+       approved more than generic ones," "posts about [recurring topic] keep getting rejected,"
+       "low-scoring posts (below ~75) are disproportionately rejected." A single rejected post
+       is NOT a pattern -- you need at least 3 rows pointing the same direction before proposing
+       anything from inference alone (an explicit reason repeated on just 2 rows can still count,
+       since it isn't inference -- see point 1).
+    3. For each real pattern found (0 to 3 of them, never invent one to have something to
        report), propose a candidate brain entry:
        - `pattern`: one sentence describing what you observed, in your own analytical voice
-         (this is YOUR observation, not Owais's -- do not write it in his first-person voice)
+         (this is YOUR observation, not Owais's -- do not write it in his first-person voice,
+         even when the underlying evidence is a reason he gave)
        - `suggested_title`: a short title for the entry, if he chooses to write it
        - `suggested_tags`: 2-4 comma-separated tags matching what get_brain_notes_tool would
          match against (topic keywords likely to appear in future briefs)
-       - `evidence`: the specific Titles/rows that support this pattern (so he can verify it
-         himself rather than take your word for it)
+       - `evidence`: the specific Titles/rows that support this pattern, quoting any `REASON
+         GIVEN` text verbatim where one exists (so he can verify it himself rather than take
+         your word for it)
        - `draft_starting_point`: 1-2 sentences a human could use as a starting point if they
-         agree -- explicitly a draft, not something to be saved verbatim. Never invent a
-         specific number, story, or reason Owais never stated; only describe the pattern
-         itself, e.g. "Posts with a specific number in the title were approved 4 of 4 times;
-         generic titles were rejected 3 of 5 times" -- not a fabricated explanation of WHY.
-    3. If nothing in the data rises to a real pattern, return an empty `candidates` list. An
+         agree -- explicitly a draft, not something to be saved verbatim. If real reasons were
+         given, you may summarize what he actually said; if you're working from inference alone
+         (no stated reasons), never invent a specific number, story, or explanation of WHY he
+         never stated -- describe only the observed pattern itself, e.g. "Posts with a specific
+         number in the title were approved 4 of 4 times; generic titles were rejected 3 of 5
+         times," not a fabricated reason for it.
+    4. If nothing in the data rises to a real pattern, return an empty `candidates` list. An
        empty result is a normal, useful outcome -- do not stretch a coincidence into a pattern.
 
     **Output (JSON only, no markdown fence):**

@@ -23,6 +23,13 @@ these are what `get_brain_notes_tool` matches against the topic/keyword of the p
 written. Everything after that is free-form: the story, the number, the opinion, in the
 owner's own words. See `_TEMPLATE.md`.
 
+**Two kinds of file live here now** (`get_brain_notes_tool` reads both, but
+`content_generator_agent` treats them very differently — see its Step 2.5 instructions):
+- **Real voice entries** — anything you write by hand. First-person, gets woven into drafts as
+  genuine experience.
+- **`coverage-*.md`** — auto-generated, see "Auto-logged coverage history" below. Never
+  first-person, never treated as an opinion; used only for topic awareness.
+
 ## How it's used
 
 `content_generator_agent` calls `get_brain_notes_tool(topic)` after loading the style guide
@@ -54,9 +61,26 @@ This is a **raw log, not a brain entry**: a bare Approved/Rejected has no reason
 `get_brain_notes_tool` never reads it — it only ever looks at `brain/*.md`.
 
 The point of keeping it is self-learning by the same rule as everything else here: **the owner
-distills, the system never auto-writes.** A `mine_feedback` stage (on-demand, see
-`scripts/run_stage.py`) periodically scans `review_feedback_log` for a recurring pattern —
-"posts about X keep getting rejected," "Y-style titles always get approved" — and posts
-candidate brain entries to Discord for review. Nothing gets written into this folder
-automatically; the owner approves each one, entry by entry, same as every other write-back gate
-in this system.
+distills, the system never auto-writes a real entry.** A `mine_feedback` stage
+(`scripts/run_stage.py::run_mine_feedback`) scans `review_feedback_log` for a recurring
+pattern — "posts about X keep getting rejected," "Y-style titles always get approved" — and
+posts candidate brain entries to Discord for review. It runs automatically right after every
+approval (`discord_bot/bot.py`'s `_log_review_feedback` dispatches it — see the code comment
+there for why the trigger moved but the review gate didn't), but the gate itself is unchanged:
+it still needs `_MINE_FEEDBACK_MIN_ROWS` real rows before it attempts anything, and it still
+only *posts a proposal* — nothing gets written into this folder from that path automatically;
+the owner authors each real entry by hand, same as ever.
+
+## Auto-logged coverage history (`coverage-*.md`)
+
+Different from the above, and the one thing in this folder that IS written automatically:
+`scripts/run_stage.py::run_log_coverage` runs daily, reads `review_feedback_log` for
+newly-**approved** (never rejected) posts, and writes one small `coverage-<slug>.md` file per
+post — title, tags derived from the title, approval date, quality score, summary. It then
+commits and pushes those files itself (this is the one stage in the whole pipeline that writes
+back to its own repo). Explicitly a **factual record, not an opinion**: every file states
+plainly that it's an auto-logged coverage record, not personal voice, and
+`content_generator_agent` is instructed to use it only for topic awareness (don't repeat an
+angle already covered) — never to quote it as a first-person story. This is why it's safe to
+auto-write even though the rest of this folder isn't: nothing here is invented, it's just a
+fact ("this topic was covered and approved") with no fabricated reasoning attached.

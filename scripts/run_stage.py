@@ -19,9 +19,12 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Dict, Optional
+
+from slugify import slugify
 
 # When Python runs a script by path (`python scripts/run_stage.py`), it puts
 # the script's own directory on sys.path[0], not the repo root -- so sibling
@@ -43,6 +46,7 @@ from blog_agent.custom_runner import FallbackAgentRunner
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
 from tools.sheet_tool import manage_sheet_data, ensure_worksheet_exists
+from tools.tools import BRAIN_DIR
 
 MAX_TURNS = 30
 
@@ -1680,6 +1684,7 @@ async def run_mine_feedback() -> None:
     rows_text = "\n".join(
         f"- {r.get('Timestamp', '')} | {r.get('Status', '')} | \"{r.get('Title', '')}\" "
         f"(score: {r.get('Quality Score', '')}) -- {r.get('Summary', '')}"
+        + (f" | REASON GIVEN: {r.get('Reason')}" if str(r.get('Reason', '')).strip() else "")
         for r in rows
     )
     print(f"[mine_feedback] Analyzing {len(rows)} review-feedback rows.")
@@ -1718,6 +1723,118 @@ async def run_mine_feedback() -> None:
     print(f"[mine_feedback] Posted {len(candidates)} candidate(s) to Discord.")
 
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _run_git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=_REPO_ROOT, capture_output=True, text=True)
+
+
+async def run_log_coverage() -> None:
+    """Auto-logs every newly-APPROVED post (never rejected) into brain/ as a
+    small, clearly-labeled coverage-history file -- per explicit request:
+    "if approve add in the brain". Deliberately NOT the same thing as a real
+    brain/ voice entry (see brain/README.md) -- this is a factual record
+    ("this topic was covered and approved"), not a fabricated opinion or
+    story, and content_generator_agent is told to treat it only as
+    topic-awareness context, never to quote it as personal experience.
+
+    Why this is a scheduled stage and not something the bot does directly on
+    approval: the Discord bot's own container has no filesystem access to
+    this repo at all (discord_bot/Dockerfile COPYs only bot.py -- see
+    discord_bot/bot.py's REVIEW_FEEDBACK_WORKSHEET comment for the same
+    constraint hit earlier this session), and even if it did, a file written
+    inside a running container is not the same as a file committed to this
+    git repository, which is the only thing get_brain_notes_tool (running
+    inside a fresh GitHub Actions checkout) ever actually reads. So the
+    write has to happen where a real, committable checkout exists -- here.
+
+    Idempotent by design: skips any approved post that already has a
+    coverage file (checked by filename, derived deterministically from the
+    title), so re-running this on a schedule never duplicates a record even
+    if the same row is read again."""
+    result = manage_sheet_data(worksheet_name="review_feedback_log", action="get_all_records")
+    if result.get("status") != "success":
+        print("[log_coverage] Couldn't read review_feedback_log this run (worksheet may not exist yet).")
+        return
+
+    rows = result.get("data") or []
+    approved = [r for r in rows if str(r.get("Status", "")).strip().upper() == "APPROVED"]
+    if not approved:
+        print("[log_coverage] No approved rows to log.")
+        return
+
+    os.makedirs(BRAIN_DIR, exist_ok=True)
+    new_files = []
+    for row in approved:
+        title = str(row.get("Title", "")).strip()
+        if not title:
+            continue
+        slug = slugify(title)[:80] or "untitled"
+        filename = f"coverage-{slug}.md"
+        path = os.path.join(BRAIN_DIR, filename)
+        if os.path.exists(path):
+            continue  # already logged in a previous run
+
+        score = str(row.get("Quality Score", "")).strip()
+        summary = str(row.get("Summary", "")).strip()
+        timestamp = str(row.get("Timestamp", "")).strip()
+        tags = ", ".join(sorted(set(w.lower() for w in re.findall(r"[a-zA-Z]{4,}", title))))[:200]
+
+        content = (
+            f"# {title}\n\n"
+            f"Tags: {tags}\n\n"
+            f"Coverage record (auto-logged from Discord approval, NOT personal voice): "
+            f"approved {timestamp or 'date unknown'}, quality score {score or 'unknown'}. "
+            f"{summary}\n\n"
+            "This is a factual record that this topic/angle was already covered and "
+            "approved -- useful for topic awareness (avoiding a redundant angle, knowing "
+            "roughly what worked before), never to be quoted or paraphrased as personal "
+            "experience, opinion, or a first-person story.\n"
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        new_files.append(path)
+        print(f"[log_coverage] Wrote {filename}")
+
+    if not new_files:
+        print("[log_coverage] Nothing new to log; all approved posts already have a coverage file.")
+        return
+
+    rel_paths = [os.path.relpath(p, _REPO_ROOT) for p in new_files]
+    _run_git("config", "user.name", "seo-blog-agent-pipeline")
+    _run_git("config", "user.email", "pipeline@owaisabdullah.dev")
+    add_result = _run_git("add", *rel_paths)
+    if add_result.returncode != 0:
+        print(f"[log_coverage] git add failed: {add_result.stderr}")
+        return
+    commit_msg = f"Auto-log {len(new_files)} approved post(s) to brain/ coverage history"
+    commit_result = _run_git("commit", "-m", commit_msg)
+    if commit_result.returncode != 0:
+        print(f"[log_coverage] git commit failed: {commit_result.stderr}")
+        return
+    push_result = _run_git("push")
+    if push_result.returncode != 0:
+        print(f"[log_coverage] git push failed: {push_result.stderr}")
+        _notify_discord_status(
+            "log_coverage", success=False,
+            detail=f"Wrote {len(new_files)} coverage file(s) but failed to push: {push_result.stderr[:300]}",
+        )
+        return
+
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    if webhook_url:
+        try:
+            _post_discord_message(
+                webhook_url,
+                f"🧠 Logged {len(new_files)} newly-approved post(s) to brain/ coverage history: "
+                + ", ".join(f'"{os.path.basename(p)}"' for p in new_files),
+            )
+        except Exception as e:
+            print(f"[log_coverage] Failed to send Discord notification: {e}")
+    print(f"[log_coverage] Committed and pushed {len(new_files)} coverage file(s).")
+
+
 STAGE_HANDLERS = {
     "research": run_research,
     "brief": run_brief,
@@ -1729,6 +1846,7 @@ STAGE_HANDLERS = {
     "repurpose": run_repurpose,
     "search_performance_review": run_search_performance_review,
     "mine_feedback": run_mine_feedback,
+    "log_coverage": run_log_coverage,
 }
 
 

@@ -395,10 +395,11 @@ def _get_keywords_worksheet():
 # ever reads brain/*.md, never this worksheet -- promoting a pattern found
 # here into a real brain/ entry stays a deliberate, human, file-writing step.
 REVIEW_FEEDBACK_WORKSHEET = "review_feedback_log"
-_REVIEW_FEEDBACK_HEADERS = ["Timestamp", "Status", "Title", "Quality Score", "Summary"]
+_REVIEW_FEEDBACK_HEADERS = ["Timestamp", "Status", "Title", "Quality Score", "Summary", "Reason"]
+_REASON_COLUMN = len(_REVIEW_FEEDBACK_HEADERS)  # 1-indexed, last column
 
 
-async def _log_review_feedback(record: dict, status: str) -> None:
+async def _log_review_feedback(record: dict, status: str, reason: str = "") -> Optional[int]:
     """Appends one row per review decision (Discord ✅/❌ or the chat
     approval tool) to REVIEW_FEEDBACK_WORKSHEET so approve/disapprove
     outcomes aren't lost the moment the reaction is handled. Uses the same
@@ -406,9 +407,23 @@ async def _log_review_feedback(record: dict, status: str) -> None:
     can arrive in the same kind of burst that originally caused add_keyword
     to silently lose topics (see docs/incident_ledger.md E4), so this write
     needs the same protection from the start rather than waiting for a live
-    incident to prove it."""
+    incident to prove it.
+
+    `reason` is the WHY behind the decision -- empty by default, since a
+    plain reaction carries none. The chat path (set_post_approval_tool) can
+    supply one directly if the user gave one in their message; the reaction
+    path (on_raw_reaction_add) has none available synchronously and instead
+    follows up afterward via _collect_rejection_reason, which fills this in
+    later using the row_index this function returns. Never fabricate a
+    reason to fill an empty one -- an unexplained decision is honest signal,
+    a made-up explanation is not.
+
+    Returns the 1-indexed row number the entry was written to (so a later
+    reason update can target it precisely), or None if the write failed."""
+    row_index: Optional[int] = None
     try:
         def _append():
+            nonlocal row_index
             client = _get_gspread_client()
             spreadsheet = client.open(SPREADSHEET_NAME)
             try:
@@ -418,28 +433,99 @@ async def _log_review_feedback(record: dict, status: str) -> None:
                     title=REVIEW_FEEDBACK_WORKSHEET, rows=100, cols=len(_REVIEW_FEEDBACK_HEADERS)
                 )
                 worksheet.append_row(_REVIEW_FEEDBACK_HEADERS, value_input_option="USER_ENTERED")
+            existing_row_count = len(worksheet.get_all_values())
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             title = str(record.get("Title", "")).strip() or "(untitled)"
             score = str(record.get("Quality Score", "")).strip()
             summary = str(record.get("Summary", "")).strip()
-            worksheet.append_row([timestamp, status.upper(), title, score, summary], value_input_option="USER_ENTERED")
+            worksheet.append_row(
+                [timestamp, status.upper(), title, score, summary, reason],
+                value_input_option="USER_ENTERED",
+            )
+            row_index = existing_row_count + 1
 
         await _run_with_sheets_retry(_append, what="review feedback log append")
     except Exception:
         logger.exception("_log_review_feedback: failed to append to review_feedback_log")
+        return None
+
+    # Per explicit request: after an approval (never a rejection), trigger
+    # mine_feedback automatically instead of requiring a manual command. This
+    # only moves WHEN the pattern search runs -- mine_feedback itself is
+    # unchanged: it still needs _MINE_FEEDBACK_MIN_ROWS real rows before it
+    # attempts anything, and it still only POSTS a candidate to Discord,
+    # never writes to brain/ itself. That review gate stays exactly as it
+    # was; only the trigger became automatic. A dispatch failure here is
+    # logged, never surfaced as an approval failure -- the approval itself
+    # already succeeded above.
+    if status.strip().lower() == "approved":
+        try:
+            dispatch_workflow("mine_feedback")
+        except Exception:
+            logger.exception("_log_review_feedback: failed to auto-dispatch mine_feedback after approval")
+
+    return row_index
 
 
-async def set_approval(title: str, status: str) -> bool:
+async def _update_review_feedback_reason(row_index: int, reason: str) -> None:
+    """Fills in the Reason cell for an already-written review_feedback_log
+    row -- used by _collect_rejection_reason once a follow-up reply arrives
+    after the original ❌ reaction (which had no reason available yet)."""
+    def _update():
+        client = _get_gspread_client()
+        worksheet = client.open(SPREADSHEET_NAME).worksheet(REVIEW_FEEDBACK_WORKSHEET)
+        worksheet.update_cell(row_index, _REASON_COLUMN, reason)
+
+    try:
+        await _run_with_sheets_retry(_update, what="review feedback reason update")
+    except Exception:
+        logger.exception("_update_review_feedback_reason: failed to update reason")
+
+
+async def _collect_rejection_reason(channel, user_id: int, row_index: int, title: str, timeout: float = 300.0) -> None:
+    """Best-effort follow-up after a ❌ reaction: ask why, and if the same
+    user replies in this channel within `timeout` seconds, log it against
+    this row. Runs as a background task (never awaited by the reaction
+    handler itself) so it can't delay or block processing further reactions.
+    Nobody answering is the expected common case, not an error -- a reason
+    is bonus signal on top of an already-successful rejection, never a
+    requirement for it."""
+    try:
+        await channel.send(f"Why? (optional -- reply here within 5 minutes and I'll log it against **{title}**)")
+    except Exception:
+        logger.exception("_collect_rejection_reason: failed to send prompt")
+        return
+
+    def _check(m: discord.Message) -> bool:
+        return m.channel.id == channel.id and m.author.id == user_id and not m.author.bot
+
+    try:
+        reply = await bot.wait_for("message", check=_check, timeout=timeout)
+    except asyncio.TimeoutError:
+        return
+
+    reason = reply.content.strip()
+    if not reason:
+        return
+    await _update_review_feedback_reason(row_index, reason)
+    try:
+        await channel.send("Logged -- thanks, that'll help future drafts on similar topics.")
+    except Exception:
+        logger.exception("_collect_rejection_reason: failed to send confirmation")
+
+
+async def set_approval(title: str, status: str) -> Optional[int]:
     """Finds the row with the given Title in generated_posts and sets its
-    Approve/Disapprove cell. Returns True if a matching row was found."""
+    Approve/Disapprove cell. Returns the review_feedback_log row index the
+    decision was logged to (so a rejection follow-up can later attach a
+    reason to the right row), or None if no matching post was found."""
     worksheet = _get_worksheet()
     records = worksheet.get_all_records()
     for i, record in enumerate(records, start=2):  # row 1 is the header
         if str(record.get("Title", "")).strip() == title.strip():
             worksheet.update_cell(i, APPROVE_DISAPPROVE_COLUMN, status)
-            await _log_review_feedback(record, status)
-            return True
-    return False
+            return await _log_review_feedback(record, status)
+    return None
 
 
 async def _run_with_sheets_retry(fn, *, max_retries: int = 4, base_delay: float = 20.0, what: str = "Sheets operation"):
@@ -871,7 +957,7 @@ def trigger_stage_tool(stage: str) -> dict:
 PUBLISHED_COLUMN = 7
 
 
-async def _update_generated_posts_column(title_reference: str, col_index: int, value: str) -> dict:
+async def _update_generated_posts_column(title_reference: str, col_index: int, value: str, reason: str = "") -> dict:
     worksheet = _get_worksheet()
     row_index = _find_row_index(worksheet, "Title", title_reference)
     if row_index is None:
@@ -881,7 +967,7 @@ async def _update_generated_posts_column(title_reference: str, col_index: int, v
         headers = worksheet.row_values(1)
         row_values = worksheet.row_values(row_index)
         record = dict(zip(headers, row_values))
-        await _log_review_feedback(record, value)
+        await _log_review_feedback(record, value, reason)
     return {"found": True, "updated": True}
 
 
@@ -897,13 +983,22 @@ async def mark_post_published_tool(title_reference: str) -> dict:
 
 
 @function_tool
-async def set_post_approval_tool(title_reference: str, approved: bool) -> dict:
+async def set_post_approval_tool(title_reference: str, approved: bool, reason: Optional[str] = None) -> dict:
     """Sets a post's Approve/Disapprove column in generated_posts, matched
     by a case-insensitive partial title match. Use this when the user tells
     you in chat to approve or reject a specific draft by name, as an
-    alternative to reacting ✅/❌ in the approval channel."""
+    alternative to reacting ✅/❌ in the approval channel.
+
+    If the user gives any reason for their decision, anywhere in their
+    message (e.g. "reject this, the title's too vague" or "approve it, good
+    use of real numbers"), pass it in `reason` close to verbatim -- don't
+    embellish or infer one they didn't actually say. This is what feeds
+    mine_feedback real reasoning instead of it having to guess a pattern
+    from the title/score alone. Leave `reason` empty/omitted if they didn't
+    give one -- an unexplained decision is honest signal; inventing a reason
+    is not."""
     status = "Approved" if approved else "Rejected"
-    return await _update_generated_posts_column(title_reference, APPROVE_DISAPPROVE_COLUMN, status)
+    return await _update_generated_posts_column(title_reference, APPROVE_DISAPPROVE_COLUMN, status, reason or "")
 
 
 # Must match scripts/run_stage.py's _CREATED_AT_FORMAT exactly -- that's the
@@ -1144,12 +1239,49 @@ def _build_discord_agent() -> Optional[Agent]:
 _discord_agent = _build_discord_agent()
 
 
-async def ask_discord_agent(user_message: str) -> str:
-    """Runs the ContentSpark Assistant agent on a user's message. Stateless
-    per call -- no conversation history/session is kept, so each mention is
-    answered fresh (the agent calls get_pipeline_status_tool itself if the
-    question needs live counts, rather than every message paying for a
-    sheet read whether it needs one or not)."""
+# How many prior channel messages get included as conversation context on
+# every chat turn (on top of the current message). Per explicit request --
+# previously this was fully stateless (each message answered with zero
+# memory of what came before, which meant "what about the second one" or
+# "why did you say that" had nothing to work from).
+CHAT_HISTORY_LIMIT = 10
+
+
+async def _fetch_recent_history(channel, before_message: discord.Message) -> list:
+    """Builds a Runner.run-compatible input list (list[{"role", "content"}])
+    from the last CHAT_HISTORY_LIMIT messages in `channel`, oldest first.
+    Discord's own channel history is the source of truth here rather than
+    the bot keeping its own session/memory store -- it's already durable
+    across bot restarts and redeploys, so there's nothing extra to persist.
+
+    Distinguishes three kinds of message: this bot's own past chat replies
+    (role "assistant"), a genuine human message (role "user"), and anything
+    else authored by a bot/webhook -- e.g. pipeline status pings and draft
+    previews posted via DISCORD_WEBHOOK_URL, which can land in this same
+    channel. That third kind is skipped entirely rather than mislabeled as
+    "user": webhook messages have their own pseudo-author identity (not
+    bot.user.id), so without this check they'd be attributed to the human
+    in the eyes of the model -- automated noise would look like something
+    the owner actually said."""
+    items = []
+    async for msg in channel.history(limit=CHAT_HISTORY_LIMIT, before=before_message):
+        content = msg.content.strip()
+        if not content:
+            continue
+        if bot.user is not None and msg.author.id == bot.user.id:
+            items.append({"role": "assistant", "content": content})
+        elif msg.author.bot:
+            continue
+        else:
+            items.append({"role": "user", "content": content})
+    items.reverse()  # channel.history() is newest-first; a conversation needs chronological order
+    return items
+
+
+async def ask_discord_agent(user_message) -> str:
+    """Runs the ContentSpark Assistant agent on either a plain string (no
+    history) or a pre-built input list (history + the current message, see
+    _fetch_recent_history) -- Runner.run accepts both forms directly."""
     if _discord_agent is None:
         return "Chat isn't configured yet -- ask the admin to set OPENROUTER_API_KEY."
     logger.info(f"[chat] Received: {user_message!r}")
@@ -1343,15 +1475,19 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
     status = "Approved" if emoji == "✅" else "Rejected"
     try:
-        found = await set_approval(title, status)
+        row_index = await set_approval(title, status)
     except Exception as e:
         logger.exception("Failed to update sheet for title %r", title)
         await channel.send(f"⚠️ Failed to record {status.lower()} for **{title}**: {e}")
         return
 
-    logger.info(f"[reaction] Title {title!r} -> {status} (found={found})")
-    if found:
+    logger.info(f"[reaction] Title {title!r} -> {status} (row_index={row_index})")
+    if row_index is not None:
         await channel.send(f"{'✅' if status == 'Approved' else '❌'} **{title}** marked {status.lower()}.")
+        if status == "Rejected":
+            # A plain ❌ carries no reason -- ask, but don't make the
+            # reaction handler wait on an answer that may never come.
+            asyncio.create_task(_collect_rejection_reason(channel, payload.user_id, row_index, title))
     else:
         await channel.send(f"⚠️ Couldn't find a row matching **{title}** in `generated_posts`.")
 
@@ -1540,7 +1676,9 @@ async def on_message(message: discord.Message):
         question = "What's the current pipeline status? Give me a quick overview."
 
     async with message.channel.typing():
-        reply = await ask_discord_agent(question)
+        history = await _fetch_recent_history(message.channel, message)
+        input_items = history + [{"role": "user", "content": question}]
+        reply = await ask_discord_agent(input_items)
     await _send_chunked(message.channel, reply)
 
     # This bot only uses slash commands (app_commands), but calling this is
