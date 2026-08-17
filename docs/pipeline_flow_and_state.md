@@ -80,8 +80,9 @@ flowchart TD
 
 ## The pipeline stages
 
-All 10 stages live in `scripts/run_stage.py`; ten `workflow_dispatch` options in
-`pipeline.yml` map 1:1 to them. Five run on a fixed schedule; five are on-demand only.
+All 11 stages live in `scripts/run_stage.py`; eleven `workflow_dispatch` options in
+`pipeline.yml` map 1:1 to them. Six run on a fixed schedule; five are on-demand only (though
+`mine_feedback`'s schedule is now event-driven rather than time-based — see below).
 
 | Stage | Trigger | Reads | Writes | Human checkpoint |
 |---|---|---|---|---|
@@ -94,7 +95,8 @@ All 10 stages live in `scripts/run_stage.py`; ten `workflow_dispatch` options in
 | `repurpose` | On-demand only (no cron — see below) | `published_posts`/Sanity | `repurposed_content` (draft only) | **Real gate** — recommend-only by default; drafting requires a human to name a specific post |
 | `freshness_sweep` | Weekly (Sun) | Sanity `_createdAt`, rotates via "Last Freshness Check" | Discord flag + edit suggestion | Human decides whether to act on the flag |
 | `search_performance_review` | Weekly (Wed) | Search Console API + Sanity | Discord flag + edit suggestion | Human decides whether to act on the flag |
-| `mine_feedback` | On-demand only (no cron, same "I decide" philosophy as `repurpose`) | `review_feedback_log` (Sheet) | Discord message with candidate `brain/` entries | **Real gate** — proposes patterns only; the owner writes the actual file, nothing is ever auto-saved to `brain/` |
+| `mine_feedback` | No cron — auto-dispatched by the bot right after every Discord approval, plus reachable on demand | `review_feedback_log` (Sheet) | Discord message with candidate `brain/` entries | **Real gate** — proposes patterns only; the owner writes the actual file, nothing is ever auto-saved to `brain/` |
+| `log_coverage` | Daily | `review_feedback_log` (Sheet, APPROVED rows only) | `brain/coverage-*.md` files, committed + pushed to this repo | **No human gate, by design** — see "What changed this session": every file is a plain fact (topic/score/date), never a fabricated opinion, so auto-writing it doesn't reintroduce the fabrication risk the other gates exist to prevent |
 
 **Why `repurpose` has no cron entry**: it used to run daily and re-post the full recommendation
 list to Discord unprompted — directly contradicting the intended "I decide what gets
@@ -206,15 +208,41 @@ repurposed" design (see `docs/incident_ledger.md` E10). It's still fully reachab
       redaction — meaningfully bigger scope, deliberately left out), and there's no guarantee
       `EXTERNAL_LINKS_MD` will often contain a URL worth screenshotting — this makes the
       capability available, it doesn't guarantee it fires often.
+11. **Approve → brain, closing the loop** (per explicit request, refined over two follow-up
+    clarifications rather than the first guess):
+    - **`mine_feedback`'s trigger moved from manual to automatic.** `discord_bot/bot.py`'s
+      `_log_review_feedback` now dispatches the `mine_feedback` workflow immediately after every
+      Discord approval (never after a rejection), instead of requiring `/run` or a chat command.
+      The stage itself is completely unchanged: still needs `_MINE_FEEDBACK_MIN_ROWS` real rows,
+      still only posts a candidate to Discord. **The review gate did not move** — only when the
+      evaluation runs did.
+    - **New `log_coverage` stage** (`scripts/run_stage.py::run_log_coverage`, daily) — the one
+      genuinely automatic write into `brain/` this session added, and the one place a bare
+      approval *does* turn into a file with no human step in between. It batches newly-APPROVED
+      `review_feedback_log` rows into small `coverage-<slug>.md` files (title, tags, approval
+      date, score, summary) and **commits + pushes them itself** — the first stage in this
+      pipeline that writes back to its own repo. Deliberately safe to automate because nothing
+      in it is invented: every file states plainly it's an auto-logged fact, not personal voice,
+      and `content_generator_agent`'s Step 2.5 was updated to use it only for topic-overlap
+      awareness ("this angle was already covered") — never to quote it as a first-person story.
+      Idempotent (skips a title that already has a coverage file, so re-running never
+      duplicates). Required a new job-level `permissions: contents: write` in `pipeline.yml`
+      (every other stage only reads its checkout and writes to external services).
+    - Verified for real, not just imported: ran `run_log_coverage()` against an isolated scratch
+      git repo (a real bare "remote" + a real clone, not the actual project repo) with synthetic
+      approved/rejected rows — confirmed only the approved ones got files, the commit landed,
+      the push reached the scratch remote, and a second run produced zero new files/commits
+      (true idempotency, not just "didn't crash").
 
 ## Gaps — ranked by what's actually worth doing next
 
 **Closed this session**: the claims ledger is now persisted (`claims_audit`), the feedback log
-has a mining step (`mine_feedback`) and is on durable shared storage (Sheets, not a local file),
-`main.py`'s status is now verified rather than asserted, `docs/overview.md` no longer
-contradicts the real system, `content_generator_agent`'s write-replay risk (E2's bug class) is
-fixed, and real (public-page) screenshots are now a capability the content pipeline has. Details
-in "What changed this session" above.
+has a mining step (`mine_feedback`, now auto-triggered on approval) and is on durable shared
+storage (Sheets, not a local file), `main.py`'s status is now verified rather than asserted,
+`docs/overview.md` no longer contradicts the real system, `content_generator_agent`'s
+write-replay risk (E2's bug class) is fixed, real (public-page) screenshots are now a capability
+the content pipeline has, and approved posts now automatically leave a factual trace in `brain/`
+via `log_coverage`. Details in "What changed this session" above.
 
 1. **The `content` stage's approval gate defaults to "Approved."** `blog_agents.py:299,313,358`
    — every generated post is written to `generated_posts` as already-approved, and the `post`
@@ -228,11 +256,12 @@ in "What changed this session" above.
    actually searched for, and how competitive is it." DataForSEO is the roadmap's recommended
    fix — needs a paid-tool budget decision from the owner before it's worth starting.
 
-3. **`brain/` is still empty**, and now so is `review_feedback_log` (needs ≥5 real review
-   decisions before `mine_feedback` will even attempt a pattern search — see
-   `_MINE_FEEDBACK_MIN_ROWS`). Both mechanisms are verified working; neither has real data yet.
-   This isn't a bug, just the gap that determines whether either feature does anything before
-   the pipeline has run for a while.
+3. **`brain/` has no real voice entries yet, and `review_feedback_log` has no real rows yet**
+   (needs ≥5 real review decisions before `mine_feedback` will even attempt a pattern search —
+   see `_MINE_FEEDBACK_MIN_ROWS`). `log_coverage`'s auto-written `coverage-*.md` files will
+   start appearing on their own the first time a real post gets approved in Discord — that part
+   no longer needs anything from the owner. The genuine voice entries (real stories, opinions,
+   numbers) still do, and always will, by design.
 
 4. **E14 from the incident ledger is still open**: the historically leaked Google
    service-account key was scrubbed from git history, but whether it was actually rotated in
