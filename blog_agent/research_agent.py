@@ -10,7 +10,7 @@ from blog_agent.hooks import MyAgentHooks
 from agents.extensions.handoff_prompt import RECOMMENDED_PROMPT_PREFIX
 from tools.sheet_tool import manage_sheet_data, get_keyword_tool, release_keyword_claim, clear_keyword_claim
 from blog_agent.custom_runner import FallbackAgentRunner
-from lib.run_result_utils import run_looks_failed as _run_looks_failed
+from lib.run_result_utils import run_looks_failed as _run_looks_failed, _JSON_FENCE_RE
 
 
 # Configure logging
