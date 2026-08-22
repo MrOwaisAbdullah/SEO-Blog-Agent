@@ -43,6 +43,7 @@ from agents.run import set_default_agent_runner
 
 from blog_agent.blog_agents import brief_agent, content_generator_agent, post_editor_agent, freshness_check_agent, repurposing_agent, repurpose_angle_agent, feedback_pattern_agent
 from blog_agent.custom_runner import FallbackAgentRunner
+from lib.run_result_utils import loads_lenient
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
 from tools.sheet_tool import manage_sheet_data, ensure_worksheet_exists
@@ -77,13 +78,15 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 
 def _parse_agent_json(output: str):
     """Parses a brief/content agent's JSON response, stripping a ```json
-    fence if present. Returns None if the output isn't a valid JSON object."""
+    fence if present. Returns None if the output isn't a valid JSON object.
+    Uses loads_lenient so a fallback model that emitted raw newlines inside
+    a string value (e.g. multi-line Markdown in "Generated Content") is
+    parsed instead of discarded -- confirmed live: strict json.loads threw
+    on exactly that shape and the stage raised despite the post being
+    complete and correct."""
     fence_match = _JSON_FENCE_RE.search(output)
     json_text = fence_match.group(1) if fence_match else output.strip()
-    try:
-        parsed = json.loads(json_text)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    parsed = loads_lenient(json_text)
     return parsed if isinstance(parsed, dict) else None
 
 

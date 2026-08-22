@@ -4,6 +4,62 @@ import re
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 
 
+def _escape_raw_control_chars(text: str) -> str:
+    """Escapes literal newline/tab/CR characters inside JSON string
+    literals (a state machine over quote/escape boundaries, so whitespace
+    between keys is left untouched). Handles the confirmed-live failure
+    mode where a fallback model emits multi-line Markdown inside a value
+    like "Generated Content" without \\n escapes -- invalid strict JSON,
+    but trivially repairable."""
+    out = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if in_string and ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            continue
+        if in_string and ch == "\n":
+            out.append("\\n")
+            continue
+        if in_string and ch == "\t":
+            out.append("\\t")
+            continue
+        if in_string and ch == "\r":
+            out.append("\\r")
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def loads_lenient(json_text):
+    """json.loads with two fallbacks for sloppy LLM JSON: strict=False
+    (permits raw control characters inside strings), then a repair pass
+    escaping raw newlines/tabs/CRs inside string literals. Returns the
+    parsed object, or None if every attempt fails. Confirmed live: a
+    content-generator model wrapped a full blog post in a ```json fence
+    with unescaped newlines inside the string values; strict parsing
+    discarded an otherwise complete, correct post."""
+    for attempt in (
+        lambda t: json.loads(t),
+        lambda t: json.loads(t, strict=False),
+        lambda t: json.loads(_escape_raw_control_chars(t), strict=False),
+    ):
+        try:
+            return attempt(json_text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return None
+
+
 def run_looks_failed(result) -> bool:
     """Whether an agent run genuinely failed -- checked against its actual
     final_output text only, never a substring match over the whole
@@ -31,7 +87,7 @@ def run_looks_failed(result) -> bool:
     fence_match = _JSON_FENCE_RE.search(output_text)
     json_text = fence_match.group(1) if fence_match else output_text
     try:
-        parsed = json.loads(json_text)
+        parsed = loads_lenient(json_text)
     except (json.JSONDecodeError, TypeError, ValueError):
         return False  # Not JSON at all -- can't be a structured error.
     if not isinstance(parsed, dict):
