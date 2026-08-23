@@ -88,7 +88,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 # resolve to the latest version of this model family" -- without it,
 # "deepseek/deepseek-v4-flash-latest" 400s as "not a valid model ID"
 # (confirmed live: real error, real OpenRouter docs screenshot).
-DEEPSEEK_MODEL = "~deepseek/deepseek-v4-flash-latest"
+DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 SHEET_SCOPE = [
     "https://spreadsheets.google.com/feeds",

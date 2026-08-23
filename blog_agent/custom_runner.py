@@ -24,7 +24,10 @@ except ImportError:
 from typing import Any, Dict, List, Optional, Union
 import asyncio
 import os
+import logging
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 # Custom runner that extends AgentRunner and adds fallback logic
 class FallbackAgentRunner(AgentRunner):
@@ -34,99 +37,80 @@ class FallbackAgentRunner(AgentRunner):
         # not per provider -- Gemini's two models here have very different
         # daily limits from each other (see the comment on model_limits).
         self.LLM_MODELS = [
+            # --- Gemini free tier: each model has its OWN independent daily
+            # request quota (RPD). Confirmed from Google AI Studio dashboard:
+            # Flash variants = 20 RPD / 5 RPM each; Lite variants = 500 RPD /
+            # 15 RPM each. Listing them as separate entries so the fallback
+            # chain can exhaust one model's quota before moving to the next,
+            # instead of sharing a single bucket.
             {"name": "gemini-flash-latest", "model": "gemini-flash-latest", "provider": "gemini"},
-            {"name": "gemini-flash-lite-latest", "model": "gemini-flash-lite-latest", "provider": "gemini"},
-            # Cohere (command-a-03-2025) removed: across this session it
-            # repeatedly returned malformed structured output when used as a
-            # fallback -- lowercase/underscored JSON keys, raw Markdown with
-            # no JSON envelope (in at least two different shapes), an
-            # unexecuted tool call leaked as plain text, and a "data"-nested
-            # wrapper instead of the documented flat structure. Each was
-            # fixed defensively in scripts/run_stage.py, but new shapes kept
-            # appearing -- removed rather than continuing to chase variants.
-            # openrouter/free is OpenRouter's own auto-router: it always
-            # resolves to whatever free model is currently available instead
-            # of a hardcoded :free model ID. OpenRouter's free catalog churns
-            # fast (one tracker recorded a third of it delisted in 9 days) --
-            # this was added specifically to replace a hardcoded qwen model
-            # that got fully removed from OpenRouter, breaking every call.
+            {"name": "gemini-3.6-flash", "model": "gemini-3.6-flash", "provider": "gemini"},
+            {"name": "gemini-3.5-flash", "model": "gemini-3.5-flash", "provider": "gemini"},
+            {"name": "gemini-3.5-flash-lite", "model": "gemini-3.5-flash-lite", "provider": "gemini"},
+            {"name": "gemini-3.1-flash-lite", "model": "gemini-3.1-flash-lite", "provider": "gemini"},
+            # DeepSeek V4 Flash via OpenRouter (paid, pay-per-token). Used as
+            # the preferred evaluation model for cross-provider bias: when a
+            # Gemini model writes content, DeepSeek evaluates it, and vice
+            # versa. Also acts as a general-purpose fallback when Gemini
+            # quota is exhausted. Cost: ~$0.07/M input tokens -- negligible
+            # for the few evaluation calls per content piece.
+            {"name": "deepseek-v4-flash", "model": "deepseek/deepseek-v4-flash-0731", "provider": "openrouter-paid"},
+            # OpenRouter free tier auto-router: resolves to whatever free
+            # model is currently available. 50 RPD without purchased credits.
             {"name": "openrouter-free", "model": "openrouter/free", "provider": "openrouter"},
         ]
 
-        # Paid, last-resort-only models. Deliberately kept out of LLM_MODELS
-        # and never passed through _sort_models_by_performance(): that sort
-        # rewards reliability, and a paid API will typically look *more*
-        # reliable than the free tiers above it, which would eventually
-        # promote it ahead of the free options it's meant to be a fallback
-        # for. run_with_fallback appends this list after the sorted free
-        # pool on every attempt instead, so it's only ever tried once
-        # everything above it has failed or is unavailable -- regardless of
-        # how well it happens to be performing.
-        # deepseek-v4-flash is text-only (no vision) -- fine here since no
-        # top-level agent run through run_with_fallback needs vision; the
-        # one agent that does (image_quality_evaluation_agent) is only ever
-        # invoked as a tool, so its own fixed model is never swapped by the
-        # fallback runner.
-        # OpenRouter uses a literal "~" prefix on a model slug to mean
-        # "always resolve to the latest version of this model family" --
-        # without it, "deepseek/deepseek-v4-flash-latest" 400s as "not a
-        # valid model ID" (confirmed live via the Discord bot hitting this
-        # exact string unprefixed; same underlying model ID used here).
-        self.LAST_RESORT_MODELS = [
-            {"name": "deepseek-v4-flash", "model": "~deepseek/deepseek-v4-flash-latest", "provider": "openrouter-paid"},
-        ]
+        # Paid, last-resort-only models. DeepSeek V4 Flash has been promoted
+        # to LLM_MODELS (for cross-provider evaluation). This list is now
+        # empty but kept for structural compatibility with run_with_fallback.
+        self.LAST_RESORT_MODELS = []
 
-        # Quota tracking is keyed by MODEL NAME, not provider. Confirmed via
-        # Google AI Studio's own rate-limits dashboard: quota is per model,
-        # and it is NOT close to uniform across the Gemini lineup -- e.g.
-        # "Gemini 3.6 Flash" (what gemini-flash-latest currently resolves
-        # to) is capped at 20 requests/day, while "Gemini 3.5 Flash Lite"
-        # (what gemini-flash-lite-latest currently resolves to) gets 500/day,
-        # a 25x difference. Treating both under one shared "gemini" bucket
-        # (the previous design) meant hitting gemini-flash-latest's tight
-        # 20/day cap made the code treat gemini-flash-lite-latest as
-        # exhausted too, even though it still had ~480 requests of its own
-        # quota left untouched.
-        self.model_usage = {
-            "gemini-flash-latest": 0,
-            "gemini-flash-lite-latest": 0,
-            "openrouter-free": 0,
-            "deepseek-v4-flash": 0,
-        }
-        # Confirmed live from the actual dashboard (peak usage vs. limit,
-        # trailing 28 days) rather than guessed: gemini-flash-latest = 20/day
-        # (also independently confirmed from a real 429's quotaValue field),
-        # gemini-flash-lite-latest = 500/day. openrouter-free is 50/day
-        # without ever having purchased credits (1000/day only applies once
-        # $10+ in credits have been bought at some point, which isn't "free"
-        # anymore). deepseek-v4-flash (paid, last-resort) has no real daily
-        # cap -- pay-per-token, not quota-limited -- the number is just a
-        # sanity ceiling.
+        # Quota tracking is keyed by MODEL NAME, not provider. Each Gemini
+        # model has its own independent daily quota (confirmed from Google
+        # AI Studio dashboard). DeepSeek is pay-per-token (no real daily
+        # cap -- the number is a sanity ceiling). openrouter-free is 50/day
+        # without purchased credits.
+        self.model_usage = {m["name"]: 0 for m in self.LLM_MODELS}
+
+        # Per-model daily request limits (RPD) from Google AI Studio dashboard.
         self.model_limits = {
             "gemini-flash-latest": 20,
-            "gemini-flash-lite-latest": 500,
-            "openrouter-free": 50,
+            "gemini-3.6-flash": 20,
+            "gemini-3.5-flash": 20,
+            "gemini-3.5-flash-lite": 500,
+            "gemini-3.1-flash-lite": 500,
             "deepseek-v4-flash": 1000,
+            "openrouter-free": 50,
         }
+
+        # Per-model requests-per-minute (RPM) limits.
+        self.model_rpm_limits = {
+            "gemini-flash-latest": 5,
+            "gemini-3.6-flash": 5,
+            "gemini-3.5-flash": 5,
+            "gemini-3.5-flash-lite": 15,
+            "gemini-3.1-flash-lite": 15,
+            "deepseek-v4-flash": 60,
+            "openrouter-free": 20,
+        }
+
         self.last_reset = datetime.now()
 
-        # Per-model performance tracking (used to sort which model to try first)
-        self.provider_stats = {
-            "gemini-flash-latest": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            "gemini-flash-lite-latest": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            "openrouter-free": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-            "deepseek-v4-flash": {"success_count": 0, "error_count": 0, "avg_response_time": 0.0},
-        }
+        # Sliding 60-second window for RPM tracking: model_name -> list of
+        # timestamps of recent calls. Cleaned up on each is_model_available
+        # check so stale entries don't accumulate.
+        self.rpm_timestamps: Dict[str, list] = {m["name"]: [] for m in self.LLM_MODELS}
 
-        # Temporary per-model unavailability tracking -- a rate-limit on
-        # gemini-flash-latest no longer marks gemini-flash-lite-latest
-        # unavailable too, since they draw from independent quota pools.
-        self.provider_unavailable_until = {
-            "gemini-flash-latest": None,
-            "gemini-flash-lite-latest": None,
-            "openrouter-free": None,
-            "deepseek-v4-flash": None,
-        }
+        # Per-model performance tracking (used to sort which model to try first)
+        self.provider_stats = {m["name"]: {"success_count": 0, "error_count": 0, "avg_response_time": 0.0} for m in self.LLM_MODELS}
+
+        # Temporary per-model unavailability tracking
+        self.provider_unavailable_until = {m["name"]: None for m in self.LLM_MODELS}
+
+        # Seed model_usage from today's model_usage_log sheet entries so
+        # quota tracking survives across process restarts (each GitHub Actions
+        # run starts a fresh process with in-memory counters at zero).
+        self._seed_usage_from_sheet()
 
     def get_gemini_client(self):
         from agents import AsyncOpenAI
@@ -187,9 +171,9 @@ class FallbackAgentRunner(AgentRunner):
         raise ValueError(f"Model name '{model_name}' not found in LLM_MODELS. Available models: {available_models}")
 
     async def is_model_available(self, model_name):
-        """Check if this specific model has quota remaining and is not
-        temporarily unavailable. Keyed by model name, not provider -- see
-        the comment on model_limits for why (per-model quota, not shared)."""
+        """Check if this specific model has quota remaining (both RPM and
+        RPD) and is not temporarily unavailable. Keyed by model name, not
+        provider -- see the comment on model_limits for why."""
         # Reset usage daily
         if (datetime.now() - self.last_reset).days >= 1:
             print(f"Resetting daily usage counters for all models")
@@ -202,23 +186,86 @@ class FallbackAgentRunner(AgentRunner):
                 print(f"Model {model_name} is temporarily unavailable")
                 return False
             else:
-                # Reset unavailability
                 self.provider_unavailable_until[model_name] = None
 
+        now = datetime.now()
         current_usage = self.model_usage.get(model_name, 0)
-        limit = self.model_limits.get(model_name, 0)
-        available = current_usage < limit - 5
+        rpd_limit = self.model_limits.get(model_name, 0)
+        rpm_limit = self.model_rpm_limits.get(model_name, 60)
 
-        print(f"Model {model_name}: {current_usage}/{limit} calls used, available: {available}")
+        # Clean stale timestamps from the RPM sliding window (>60s old)
+        cutoff = now - timedelta(seconds=60)
+        self.rpm_timestamps.setdefault(model_name, [])
+        self.rpm_timestamps[model_name] = [
+            ts for ts in self.rpm_timestamps[model_name] if ts > cutoff
+        ]
+        current_rpm = len(self.rpm_timestamps[model_name])
+
+        rpd_ok = current_usage < rpd_limit - 5
+        rpm_ok = current_rpm < rpm_limit
+        available = rpd_ok and rpm_ok
+
+        print(f"Model {model_name}: {current_usage}/{rpd_limit} RPD, {current_rpm}/{rpm_limit} RPM, available: {available}")
         return available
 
     async def increment_usage(self, model_name):
-        """Increment usage for this specific model."""
+        """Increment usage, track RPM, and log to Google Sheet."""
         if model_name in self.model_usage:
             self.model_usage[model_name] += 1
             print(f"Incremented usage for {model_name}: {self.model_usage[model_name]}")
         else:
             print(f"Warning: Unknown model {model_name}")
+        # Record timestamp for RPM sliding window
+        self.rpm_timestamps.setdefault(model_name, []).append(datetime.now())
+
+    async def _log_usage_to_sheet(self, model_name: str, agent_name: str, stage: str, success: bool, latency: float):
+        """Append one row to model_usage_log worksheet. Non-blocking:
+        failures are logged but never raise or break the pipeline."""
+        try:
+            from tools.sheet_tool import get_spreadsheet, ensure_worksheet_exists
+            headers = ["Timestamp", "Model", "Agent", "Stage", "Status", "Latency (s)"]
+            ensure_worksheet_exists("model_usage_log", headers)
+            spreadsheet = get_spreadsheet()
+            worksheet = spreadsheet.worksheet("model_usage_log")
+            worksheet.append_row(
+                [
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    model_name,
+                    agent_name,
+                    stage,
+                    "success" if success else "error",
+                    f"{latency:.1f}",
+                ],
+                value_input_option="USER_ENTERED",
+            )
+        except Exception as e:
+            logger.warning(f"model_usage_log append failed (non-fatal): {e}")
+
+    def _seed_usage_from_sheet(self):
+        """Read today's model_usage_log entries and seed model_usage so
+        quota tracking survives across process restarts (each GitHub Actions
+        run starts a fresh process). Called once at __init__ time."""
+        try:
+            from tools.sheet_tool import get_spreadsheet, ensure_worksheet_exists
+            headers = ["Timestamp", "Model", "Agent", "Stage", "Status", "Latency (s)"]
+            ensure_worksheet_exists("model_usage_log", headers)
+            spreadsheet = get_spreadsheet()
+            worksheet = spreadsheet.worksheet("model_usage_log")
+            records = worksheet.get_all_records()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            counts: Dict[str, int] = {}
+            for row in records:
+                ts = str(row.get("Timestamp", ""))
+                model = str(row.get("Model", ""))
+                if ts.startswith(today_str) and model in self.model_usage:
+                    counts[model] = counts.get(model, 0) + 1
+            if counts:
+                self.model_usage = {name: counts.get(name, 0) for name in self.model_usage}
+                print(f"[Usage] Seeded from sheet: {counts}")
+            else:
+                print("[Usage] No sheet entries for today; starting fresh.")
+        except Exception as e:
+            logger.warning(f"model_usage_log seeding failed (non-fatal, starting fresh): {e}")
 
     def is_llm_error(self, e):
         msg = str(e).lower()
@@ -293,28 +340,42 @@ class FallbackAgentRunner(AgentRunner):
         """
         Run an agent with fallback logic across different LLM providers/models.
 
-        Note: this does not chase SDK-level handoffs itself. `Runner.run()`
-        (invoked via `_execute_agent_run`) already resolves any handoffs
-        configured on an agent within a single call, so by the time a result
-        comes back, `result.last_agent` is just informational, not a signal
-        that execution stopped mid-handoff.
+        If the agent has a ``preferred_model`` attribute, that model is tried
+        first (if available) before falling through to the performance-sorted
+        free pool.  This enables cross-provider evaluation: a Gemini-written
+        post gets evaluated by DeepSeek, and vice versa, without forcing the
+        paid model on every agent.
+
+        Usage is logged to the ``model_usage_log`` Google Sheet (non-blocking
+        on failure) so quota tracking survives across process restarts.
         """
         last_error = None
+        agent_name = getattr(agent, "name", "unknown")
+        # Infer stage from agent name (e.g. "Content Generator Agent" -> "content")
+        stage = agent_name.split()[0].lower() if agent_name else "unknown"
 
         for attempt in range(max_retries):
-            # LAST_RESORT_MODELS is appended after sorting, never sorted
-            # itself, so it's always tried last regardless of how well it
-            # happens to be performing (see comment on LAST_RESORT_MODELS).
+            # Build model list: preferred_model first (if set and available),
+            # then performance-sorted free pool, then LAST_RESORT_MODELS.
             sorted_models = self._sort_models_by_performance() + self.LAST_RESORT_MODELS
+            preferred_name = getattr(agent, "preferred_model", None)
+            if preferred_name:
+                preferred_cfg = next(
+                    (m for m in self.LLM_MODELS if m["name"] == preferred_name), None
+                )
+                if preferred_cfg:
+                    sorted_models = [preferred_cfg] + [
+                        m for m in sorted_models if m["name"] != preferred_name
+                    ]
 
             for model_config in sorted_models:
                 try:
                     if not await self.is_model_available(model_config["name"]):
                         continue
                     agent.model = self.get_model_by_name(model_config["name"])
-                    print(f"[Fallback] Trying agent '{agent.name}' with model '{model_config['name']}' (attempt {attempt + 1})")
+                    print(f"[Fallback] Trying agent '{agent_name}' with model '{model_config['name']}' (attempt {attempt + 1})")
                     if isinstance(input_data, list):
-                        print(f"[Debug] Input length for agent '{agent.name}': {len(input_data)}")
+                        print(f"[Debug] Input length for agent '{agent_name}': {len(input_data)}")
 
                     start_time = datetime.now()
                     result = await self._execute_agent_run(
@@ -328,11 +389,19 @@ class FallbackAgentRunner(AgentRunner):
                     response_time = (datetime.now() - start_time).total_seconds()
                     await self._update_provider_stats(model_config["name"], True, response_time)
                     await self.increment_usage(model_config["name"])
-                    print(f"[DEBUG] Agent '{agent.name}' run complete.")
+                    # Log success to sheet (non-blocking)
+                    asyncio.create_task(
+                        self._log_usage_to_sheet(model_config["name"], agent_name, stage, True, response_time)
+                    )
+                    print(f"[DEBUG] Agent '{agent_name}' run complete.")
                     return result
                 except Exception as e:
                     response_time = (datetime.now() - start_time).total_seconds() if 'start_time' in locals() else 0.0
                     await self._update_provider_stats(model_config["name"], False, response_time)
+                    # Log failure to sheet (non-blocking)
+                    asyncio.create_task(
+                        self._log_usage_to_sheet(model_config["name"], agent_name, stage, False, response_time)
+                    )
 
                     if not self.is_llm_error(e):
                         print(f"[Fallback] Non-LLM error: {e} -- not retrying fallback.")
@@ -355,10 +424,10 @@ class FallbackAgentRunner(AgentRunner):
 
             if attempt < max_retries - 1:
                 wait_time = 5 * (2 ** attempt)
-                print(f"[Fallback] All models failed for agent '{agent.name}' in attempt {attempt + 1}, waiting {wait_time}s before retry...")
+                print(f"[Fallback] All models failed for agent '{agent_name}' in attempt {attempt + 1}, waiting {wait_time}s before retry...")
                 await asyncio.sleep(wait_time)
 
-        error_msg = f"All LLM providers failed for agent {agent.name} after {max_retries} retries"
+        error_msg = f"All LLM providers failed for agent {agent_name} after {max_retries} retries"
         if last_error:
             error_msg += f". Last error: {str(last_error)}"
         print(f"[Fallback] {error_msg}")

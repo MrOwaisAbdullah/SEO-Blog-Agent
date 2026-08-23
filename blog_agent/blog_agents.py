@@ -151,13 +151,15 @@ content_evaluation_agent = Agent(
     ```
     """,
     tools=[manage_sheet_data_tool, web_search_tool, textstat_tool, grammar_check_tool],
-    # gemini-2.0-flash was retired by Google (March 3, 2026). Flash-Lite is
-    # the appropriate, still-current, cheapest fit for a scoring/evaluation
-    # task (lighter than full content generation).
-    model=custom_runner.get_model_by_name("gemini-flash-lite-latest"),
+    # Cross-provider evaluation: DeepSeek evaluates Gemini-written content
+    # and vice versa, preventing same-provider bias. DeepSeek V4 Flash is
+    # pay-per-token (~$0.07/M) -- negligible for the few evaluation calls
+    # per content piece.
+    model=custom_runner.get_model_by_name("deepseek-v4-flash"),
     hooks=MyAgentHooks(),
     model_settings=ModelSettings(temperature=0.4),
 )
+content_evaluation_agent.preferred_model = "deepseek-v4-flash"
 
 content_generator_agent = Agent(
     name="Content Generator Agent",
@@ -587,7 +589,7 @@ repurpose_angle_agent = Agent(
     """,
     tools=[],
     hooks=MyAgentHooks(),
-    model=custom_runner.get_model_by_name("gemini-flash-lite-latest"),
+    model=custom_runner.get_model_by_name("gemini-3.5-flash-lite"),
     model_settings=ModelSettings(temperature=0.6),
 )
 
@@ -658,7 +660,7 @@ feedback_pattern_agent = Agent(
     """,
     tools=[],
     hooks=MyAgentHooks(),
-    model=custom_runner.get_model_by_name("gemini-flash-lite-latest"),
+    model=custom_runner.get_model_by_name("gemini-3.5-flash-lite"),
     model_settings=ModelSettings(temperature=0.3),
 )
 
