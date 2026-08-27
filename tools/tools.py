@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 fetch_internal_links_usage_count = 0
 MAX_INTERNAL_LINKS_CALLS = 3
 
+
+def reset_internal_links_counter():
+    """Reset the per-stage internal links call counter. Call at the start of
+    each pipeline stage so every stage gets its own budget of 3 calls."""
+    global fetch_internal_links_usage_count
+    fetch_internal_links_usage_count = 0
+
 # Define Pydantic model for FAQ items
 class FAQItem(BaseModel):
     question: str = Field(..., description="The FAQ question")

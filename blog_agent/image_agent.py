@@ -200,7 +200,11 @@ contextual_image_insertion_agent = Agent(
     3. **Review Feedback**: Consider the evaluation feedback for placement decisions
     
     ## Insertion Guidelines:
-    - Insert a maximum of 2 images per blog post
+    - Image count scales with content length:
+      - Under 1200 words: 1–2 images
+      - 1200–2000 words: 2–3 images
+      - Over 2000 words: 3–4 images
+    - Count the approximate word count of CONTENT_WITH_LINKS before deciding.
     - Place images close to relevant content, not arbitrarily
     - Ensure alt text accurately describes the image content
     - Use descriptive filenames that reflect image content

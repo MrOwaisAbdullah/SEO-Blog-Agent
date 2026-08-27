@@ -47,7 +47,7 @@ from lib.run_result_utils import loads_lenient
 from blog_agent.posting_agent import run_posting_workflow
 from blog_agent.research_agent import combined_research_workflow, run_topic_discovery_workflow
 from tools.sheet_tool import manage_sheet_data, ensure_worksheet_exists
-from tools.tools import BRAIN_DIR
+from tools.tools import BRAIN_DIR, reset_internal_links_counter
 
 MAX_TURNS = 30
 
@@ -474,6 +474,7 @@ def _select_review_candidate(
 
 def _select_review_candidate_from_sanity(
     sanity_index: Dict[str, dict], sheet_rows_by_title: Dict[str, dict], check_column: str, min_age_days: Optional[int] = None,
+    already_checked: Optional[set] = None,
 ) -> Optional[str]:
     """Like _select_review_candidate, but candidates come from the live
     Sanity post list (sanity_index) instead of generated_posts sheet rows.
@@ -492,12 +493,20 @@ def _select_review_candidate_from_sanity(
     there's no stamp history to compare -- stamping later also silently
     no-ops for these (find_row_by_key just won't find a row), which is
     fine, they simply keep surfacing until something creates a row for
-    them some other way."""
+    them some other way.
+
+    already_checked: optional in-memory set of titles already checked in
+    this process run, used to prevent re-selection when sheet stamping
+    no-ops for posts without a generated_posts row."""
     now = datetime.now(timezone.utc)
     never_checked = []
     previously_checked = []
     for title, info in sanity_index.items():
         if not title:
+            continue
+        # Skip posts already checked in this run (prevents repeated flagging
+        # when stamping can't record the check -- e.g. no sheet row exists).
+        if already_checked and title in already_checked:
             continue
         created_at = info.get("created_at")
         if min_age_days is not None and created_at is not None and (now - created_at).days < min_age_days:
@@ -923,6 +932,9 @@ _CLAIMS_AUDIT_HEADERS = ["Title", "Keyword/Topic", "Quality Score", "Claims Note
 
 
 async def run_content() -> None:
+    # Reset internal links counter so this stage gets its own budget
+    reset_internal_links_counter()
+
     # _persist_claims_audit (below, called after content_generator_agent
     # returns) needs this worksheet to exist -- manage_sheet_data has no
     # auto-create (see ensure_worksheet_exists's docstring). Same
@@ -1003,6 +1015,7 @@ async def run_content() -> None:
 
 
 async def run_post() -> None:
+    reset_internal_links_counter()
     result = await run_posting_workflow()
     print(f"[post] result: {result}")
     if isinstance(result, dict) and result.get("status") == "error":
@@ -1481,6 +1494,10 @@ SEARCH_PERFORMANCE_LOW_CTR = 0.01  # 1%
 SEARCH_PERFORMANCE_HIGH_POSITION = 15  # roughly "page 2 or worse"
 SEARCH_PERFORMANCE_MIN_AGE_DAYS = 35  # needs a full 28-day GSC window post-publish, plus buffer
 
+# In-memory set of titles already checked in this process run. Prevents
+# re-selection when stamping no-ops (no generated_posts row exists).
+_search_perf_already_checked: set = set()
+
 
 async def run_search_performance_review() -> None:
     """Checks the published post most overdue for a performance review
@@ -1532,12 +1549,17 @@ async def run_search_performance_review() -> None:
 
     title = _select_review_candidate_from_sanity(
         sanity_index, sheet_rows_by_title, "Last Performance Check", min_age_days=SEARCH_PERFORMANCE_MIN_AGE_DAYS,
+        already_checked=_search_perf_already_checked,
     )
     if title is None:
         msg = f"No published posts eligible right now (needs to be {SEARCH_PERFORMANCE_MIN_AGE_DAYS}+ days old)."
         print(f"[search_performance_review] {msg}")
         _notify(f"📊 Search performance review: {msg}")
         return
+
+    # Track that we checked this title so it can't be re-selected if
+    # stamping no-ops (no generated_posts row) later in this run.
+    _search_perf_already_checked.add(title)
 
     # Stamp before the actual check, not after -- so a genuine crash mid-run
     # doesn't leave this exact post stuck being re-selected forever. A

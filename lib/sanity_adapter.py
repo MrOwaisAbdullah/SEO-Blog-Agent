@@ -78,7 +78,10 @@ class SanityAdapter:
         if exclude_slug:
             query += ' && slug.current != $excludeSlug'
             params["excludeSlug"] = exclude_slug
-        query += f'[0...{max_results}]{{title, "slug": slug.current, summary}}'
+        # Order by newest first so the same old posts don't dominate every
+        # internal link set; fetch 3x and slice to max_results for variety.
+        fetch_limit = max_results * 3
+        query += f' | order(_createdAt desc)[0...{fetch_limit}]{{title, "slug": slug.current, summary}}'
 
         endpoint = self._build_query_endpoint(query, params)
         attempt = 0
@@ -120,7 +123,7 @@ class SanityAdapter:
             if exclude_slug:
                 broad_query += ' && slug.current != $excludeSlug'
                 broad_params["excludeSlug"] = exclude_slug
-            broad_query += f'][0...{max_results}]{{title, "slug": slug.current, summary}}'
+            broad_query += f' | order(_createdAt desc)[0...{fetch_limit}]{{title, "slug": slug.current, summary}}'
             broad_endpoint = self._build_query_endpoint(broad_query, broad_params)
             attempt = 0
             while attempt < max_retries:
