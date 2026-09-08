@@ -1,10 +1,20 @@
-# ContentSpark AI - SEO Blog Agent
+# ContentSpark AI — Autonomous Multi-Platform SEO Blog Agent
 
-Automated SEO-optimized blog post generation system that creates 15-17 high-quality posts daily for a Next.js website hosted on Vercel with Sanity CMS.
+[![Python 3.12](https://img.shields.io/badge/Python-3.12+-blue.svg?logo=python)](https://python.org)
+[![Publishing: Sanity CMS](https://img.shields.io/badge/CMS-Sanity.io-red.svg?logo=sanity)](https://sanity.io)
+[![Adapters: WordPress | Shopify | Wix](https://img.shields.io/badge/Adapters-WordPress%20%7C%20Shopify%20%7C%20Wix-green.svg)](https://github.com/MrOwaisAbdullah/SEO-Blog-Agent)
+[![Gateways: Discord | Telegram | WhatsApp](https://img.shields.io/badge/Gateways-Discord%20%7C%20Telegram%20%7C%20WhatsApp-5865F2.svg)](https://github.com/MrOwaisAbdullah/SEO-Blog-Agent)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+> **Autonomous multi-agent system that researches, writes, and publishes 15–17 SEO-optimized articles daily. Directly pushes to Sanity CMS with extensible adapters for WordPress, Shopify, Wix, and Headless CMS platforms, integrated with Discord, Telegram, and WhatsApp gateways for real-time notifications and approvals.**
+
+---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Multi-Platform CMS Adapters](#multi-platform-cms-adapters)
+- [Omnichannel Notification Gateways](#omnichannel-notification-gateways)
 - [System Architecture](#system-architecture)
 - [Prerequisites](#prerequisites)
 - [Environment Variables](#environment-variables)
@@ -15,9 +25,37 @@ Automated SEO-optimized blog post generation system that creates 15-17 high-qual
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
+---
+
 ## Overview
 
-ContentSpark AI is an automated system designed to generate 15–17 high-quality, SEO-optimized blog posts daily for a SaaS platform focused on automated social media content creation and scheduling. The system uses a multi-agent workflow orchestrated by the OpenAI Agents SDK with free-tier APIs and fallbacks for reliability.
+**ContentSpark AI** is an autonomous content engine designed to eliminate manual content production bottlenecks. Powered by a multi-agent orchestration pipeline (using the OpenAI Agents SDK and Google Gemini / OpenRouter fallbacks), the system performs deep search intent analysis, keyword discovery, content brief structuring, high-authority article generation, image generation, and automated multi-platform publishing.
+
+While natively configured to publish rich portable text directly to **Sanity CMS**, ContentSpark AI features a modular adapter architecture allowing seamless publication to **WordPress, Shopify, Wix, custom Webhooks, and any headless CMS**.
+
+---
+
+## 🌐 Multi-Platform CMS Adapters
+
+ContentSpark AI separates content generation from publishing targets via a pluggable adapter layer:
+
+| Target Platform | Integration Method | Status | Capabilities |
+| :--- | :--- | :---: | :--- |
+| **Sanity CMS** | Sanity REST API / Client | ✅ Active | Rich Portable Text, Authors, Categories, Slugs, Assets |
+| **WordPress** | WP REST API (`/wp/v2/posts`) | 🔌 Pluggable | Formatted HTML, Featured Media, Yoast/RankMath SEO meta |
+| **Shopify Blogs** | Shopify Admin REST / GraphQL | 🔌 Pluggable | Article publishing, Blog tags, Authors, SEO handle |
+| **Wix & Webflow** | Wix REST API & Webflow CMS | 🔌 Pluggable | Automated item creation, Collection binding |
+| **Custom Headless** | Webhook / JSON Payload | 🔌 Pluggable | Next.js, Nuxt, Astro, or custom backend endpoints |
+
+---
+
+## 📲 Omnichannel Notification & Control Gateways
+
+Keep humans in the loop or receive instant live updates via your preferred messaging channels:
+
+- 🎮 **Discord Gateway**: Automated webhook and bot alerts with rich embeds whenever an article is drafted, queued, or published.
+- ✈️ **Telegram Gateway**: Bot integration sending instant post summaries, direct preview links, and approval buttons.
+- 💬 **WhatsApp Gateway**: Business API / webhook notifications for instant publishing alerts and remote workflow triggers.
 
 ## System Architecture
 
