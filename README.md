@@ -1,43 +1,27 @@
-# ContentSpark AI — Autonomous Multi-Platform SEO Blog Agent
+# ContentFTE — Autonomous AI Content Employee (Digital FTE)
 
+[![Part of FTE Suite](https://img.shields.io/badge/Fleet-Digital%20FTE%20Suite-blueviolet.svg)](https://github.com/MrOwaisAbdullah/Digital-FTE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12+-blue.svg?logo=python)](https://python.org)
 [![Publishing: Sanity CMS](https://img.shields.io/badge/CMS-Sanity.io-red.svg?logo=sanity)](https://sanity.io)
-[![Adapters: WordPress | Shopify | Wix](https://img.shields.io/badge/Adapters-WordPress%20%7C%20Shopify%20%7C%20Wix-green.svg)](https://github.com/MrOwaisAbdullah/SEO-Blog-Agent)
-[![Gateways: Discord | Telegram | WhatsApp](https://img.shields.io/badge/Gateways-Discord%20%7C%20Telegram%20%7C%20WhatsApp-5865F2.svg)](https://github.com/MrOwaisAbdullah/SEO-Blog-Agent)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Adapters: WordPress | Shopify | Wix](https://img.shields.io/badge/Adapters-WordPress%20%7C%20Shopify%20%7C%20Wix-green.svg)](https://github.com/MrOwaisAbdullah/ContentFTE)
+[![Gateways: Discord | Telegram | WhatsApp](https://img.shields.io/badge/Gateways-Discord%20%7C%20Telegram%20%7C%20WhatsApp-5865F2.svg)](https://github.com/MrOwaisAbdullah/ContentFTE)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-orange.svg)](./LICENSE)
 
-> **Autonomous multi-agent system that researches, writes, and publishes 15–17 SEO-optimized articles daily. Directly pushes to Sanity CMS with extensible adapters for WordPress, Shopify, Wix, and Headless CMS platforms, integrated with Discord, Telegram, and WhatsApp gateways for real-time notifications and approvals.**
-
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Multi-Platform CMS Adapters](#multi-platform-cms-adapters)
-- [Omnichannel Notification Gateways](#omnichannel-notification-gateways)
-- [System Architecture](#system-architecture)
-- [Prerequisites](#prerequisites)
-- [Environment Variables](#environment-variables)
-- [Installation](#installation)
-- [Setup Instructions](#setup-instructions)
-- [API Endpoints](#api-endpoints)
-- [Workflow](#workflow)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
+> **Autonomous multi-agent Digital FTE that researches, writes, and publishes 15–17 SEO-optimized articles daily. Directly pushes to Sanity CMS with extensible adapters for WordPress, Shopify, Wix, and Headless CMS platforms, integrated with Discord, Telegram, and WhatsApp gateways for real-time notifications and approvals.**
 
 ---
 
 ## Overview
 
-**ContentSpark AI** is an autonomous content engine designed to eliminate manual content production bottlenecks. Powered by a multi-agent orchestration pipeline (using the OpenAI Agents SDK and Google Gemini / OpenRouter fallbacks), the system performs deep search intent analysis, keyword discovery, content brief structuring, high-authority article generation, image generation, and automated multi-platform publishing.
+**ContentFTE** is an autonomous content engine designed to eliminate manual content production bottlenecks. Powered by a multi-agent orchestration pipeline (using the OpenAI Agents SDK and Google Gemini / OpenRouter fallbacks), the system performs deep search intent analysis, keyword discovery, content brief structuring, high-authority article generation, image generation, and automated multi-platform publishing.
 
-While natively configured to publish rich portable text directly to **Sanity CMS**, ContentSpark AI features a modular adapter architecture allowing seamless publication to **WordPress, Shopify, Wix, custom Webhooks, and any headless CMS**.
+While natively configured to publish rich portable text directly to **Sanity CMS**, ContentFTE features a modular adapter architecture allowing seamless publication to **WordPress, Shopify, Wix, custom Webhooks, and any headless CMS**.
 
 ---
 
 ## 🌐 Multi-Platform CMS Adapters
 
-ContentSpark AI separates content generation from publishing targets via a pluggable adapter layer:
+ContentFTE separates content generation from publishing targets via a pluggable adapter layer:
 
 | Target Platform | Integration Method | Status | Capabilities |
 | :--- | :--- | :---: | :--- |
@@ -129,7 +113,7 @@ DEFAULT_MODEL=gemini-2.5-flash
 #### Google Sheets Credentials
 - `GOOGLE_CREDENTIALS` - JSON string of Google Service Account credentials (contents of your service account key file)
   
-  _Note: This should contain the entire JSON content from your Google Service Account key file, not a file path. The service account key file (e.g., `contentspark-service-account-key.json`) should be kept secure and never committed to version control._
+  _Note: This should contain the entire JSON content from your Google Service Account key file, not a file path. The service account key file (e.g., `contentfte-service-account-key.json`) should be kept secure and never committed to version control._
 
 #### Search and Research API Keys
 - `TAVILY_API_KEY` - Tavily API key for web search and research
@@ -147,7 +131,7 @@ DEFAULT_MODEL=gemini-2.5-flash
 1. **Clone the repository:**
    ```bash
    git clone <repository-url>
-   cd seo-blog-agent
+   cd ContentFTE
    ```
 
 2. **Install dependencies (this project uses [uv](https://docs.astral.sh/uv/), not pip):**
@@ -166,8 +150,8 @@ DEFAULT_MODEL=gemini-2.5-flash
 
 ### 1. Google Sheets Setup
 
-1. Create a Google Sheet named "ContentSpark" with the following worksheets:
-   - `ContentSpark_Keywords` - For input keywords/YouTube URLs
+1. Create a Google Sheet named "ContentFTE" with the following worksheets:
+   - `ContentFTE_Keywords` - For input keywords/YouTube URLs
    - `research_data` - For research findings
    - `content_briefs` - For content briefs
    - `generated_posts` - For generated blog posts
@@ -177,14 +161,14 @@ DEFAULT_MODEL=gemini-2.5-flash
 3. Create a Service Account:
    - Go to Google Cloud Console → IAM & Admin → Service Accounts
    - Create a new service account
-   - Download the JSON key file (e.g., `contentspark-service-account-key.json`)
+   - Download the JSON key file (e.g., `contentfte-service-account-key.json`)
    - Keep this file secure and never commit it to version control
 
 4. Configure Google Sheets Access:
    - Open your Google Sheet
    - Click "Share" button
    - Add the service account email address from your JSON key file as an editor
-   - The email will look like: `contentspark-service-account@your-project.iam.gserviceaccount.com`
+   - The email will look like: `contentfte-service-account@your-project.iam.gserviceaccount.com`
 
 ### 2. Sanity CMS Setup
 
@@ -263,7 +247,7 @@ Publishes an approved blog post to Sanity CMS.
 
 The system follows a multi-step workflow:
 
-1. **Triage** - Selects the next keyword or YouTube URL from the ContentSpark_Keywords sheet
+1. **Triage** - Selects the next keyword or YouTube URL from the ContentFTE_Keywords sheet
 2. **Research** - Conducts research on the selected topic using Tavily API
 3. **Brief Creation** - Creates a content brief from research findings
 4. **Content Generation** - Generates a full blog post from the brief
@@ -280,7 +264,7 @@ Each step is handled by a dedicated agent with built-in fallback logic across di
    - Rotate API keys regularly
 
 2. **Google Service Account**:
-   - Keep the service account key file (`contentspark-service-account-key.json`) secure
+   - Keep the service account key file (`contentfte-service-account-key.json`) secure
    - Limit the service account's permissions to only what's necessary
    - Use a dedicated service account for this application
 
